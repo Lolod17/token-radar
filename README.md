@@ -4,11 +4,12 @@
 
 # Token Radar
 
-An entry for make.fun's `token-radar-01` bounty. It reads a sealed DefiLlama snapshot and ranks protocols that record no token by what their launch would be worth if their record stayed as it is. Each protocol gets a farm plan with a cost and a time for every step.
+An entry for make.fun's `token-radar-01` bounty. It reads a sealed DefiLlama snapshot and ranks protocols that record no token by their TVL, alongside an illustrated estimate of what their launch might be worth. Each protocol gets a farm plan with a cost and a time for every step.
 
 ## What it does
 
-- **Board.** Ranks 178 protocols: all 40 on the snapshot's watchlist, plus 138 below the $50M floor that record no token and pass the watchlist's product tests. You can sort by any column, search, and filter by scope (all, watchlist, below floor), category, chain, and 7-day growth.
+- **Board.** Orders 178 protocols by TVL: all 40 on the snapshot's watchlist, plus 138 below the $50M floor that record no token and pass the watchlist's product tests. You can sort by any column, search, and filter by scope (all, watchlist, below floor), category, chain, and 7-day growth.
+- **Why TVL, not implied value.** A leave-one-out test on the snapshot's live-token protocols (run by `main.ts`, saved as `validation.json`, shown on the Model tab) finds that raw TVL ranks market cap better than the implied-value model: Spearman 0.40 vs 0.39, on the 128 protocols with both a market cap and a TVL. The implied value is an illustration on each row, not the sort key.
 - **Value model** (`dashboard/model.js`): `implied value = TVL × category multiple × growth factor × tokenless-run factor`.
   - **Category multiple.** The median market-cap/TVL ratio of the snapshot's protocols in the same category that already trade a token, blended in log space toward the median over all 128 of them. Thin categories lean on the overall median.
   - **Growth factor.** `1 + 1.5 × change_7d / 100`, with the 7-day change capped at ±20%.
@@ -17,7 +18,7 @@ An entry for make.fun's `token-radar-01` bounty. It reads a sealed DefiLlama sna
 - **Detail view.** Shows the formula with the protocol's own numbers, the live-token peers behind its multiple, and any fields the snapshot lacks (marked as missing, never filled in). It also shows the farm plan.
 - **Live tokens and Set aside tabs.** These list the protocols that already trade a token (the comparables) and the tokenless wrapped, staked, bridged or child products left off the board, each with the reason.
 
-The implied values are this dashboard's own estimate. They don't forecast whether or when any token launches. The farm plans' gas costs and $1,000 position size are stated assumptions, not snapshot data.
+The implied values are this dashboard's own estimate and do not set the board's order; TVL does. They don't forecast whether or when any token launches. The farm plans' gas costs and $1,000 position size are stated assumptions, not snapshot data.
 
 ## Run it locally
 
@@ -29,7 +30,7 @@ cd /tmp/tokenradar-out && python3 -m http.server 8000
 # open http://localhost:8000/dashboard/
 ```
 
-`main.ts` writes `board.json`, `data.js` (the snapshot for the page), `dashboard/`, `screenshots/` and `dossier.json` to the output directory. The page loads `model.js` as an ES module, so serve it over HTTP instead of opening it from `file://`.
+`main.ts` writes `board.json`, `validation.json` (with `validation.data.js`, its copy for the page), `data.js` (the snapshot for the page), `dashboard/`, `screenshots/` and `dossier.json` to the output directory. The page loads `model.js` as an ES module, so serve it over HTTP instead of opening it from `file://`.
 
 ## License
 

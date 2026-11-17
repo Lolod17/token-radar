@@ -165,10 +165,131 @@ export function buildRadar(snap) {
     const s = score(p, snap.as_of, comps);
     rows.push({ ...p, ...s, watchlist: watch.has(p.slug), plan: farmPlan(p, s) });
   }
-  rows.sort((a, b) => b.implied_value_usd - a.implied_value_usd || (a.slug < b.slug ? -1 : 1));
+  rows.sort((a, b) => b.tvl_usd - a.tvl_usd || (a.slug < b.slug ? -1 : 1));
   rows.forEach((r, i) => { r.rank = i + 1; });
   aside.sort((a, b) => b.tvl_usd - a.tvl_usd);
   const live = comps.live.map((p) => ({ slug: p.slug, name: p.name, symbol: p.symbol, category: p.category, tvl_usd: p.tvl_usd, mcap_usd: p.mcap_usd, change_7d: p.change_7d, ratio: r4(p.mcap_usd / p.tvl_usd) }))
     .sort((a, b) => b.mcap_usd - a.mcap_usd);
   return { as_of: snap.as_of, source: snap.source, floor_usd: snap.floor_usd, total: snap.protocols.length, watch_n: snap.watchlist.length, global_multiple: r4(comps.global), rows, live, aside };
+}
+
+// ---------------------------------------------------------------- validation
+//
+// A leave-one-out test on the snapshot's own live-token protocols: does the
+// implied-value model rank market cap better than raw TVL? For each live token
+// (both a market cap and a TVL), fit a predictor on every *other* live token and
+// predict this one's market cap; then compare the predictions with the truth.
+// TVL alone wins, so the board is ordered by TVL and the page says why.
+
+const logOf = (x) => Math.log(x);
+
+/** Average ranks (1-based) of `xs`, ties sharing their average rank: the input to Spearman. */
+function ranksOf(xs) {
+  const idx = xs.map((v, i) => [v, i]).sort((a, b) => a[0] - b[0]);
+  const r = new Array(xs.length);
+  for (let i = 0; i < idx.length;) {
+    let j = i;
+    while (j + 1 < idx.length && idx[j + 1][0] === idx[i][0]) j++;
+    const avg = (i + j) / 2 + 1;
+    for (let k = i; k <= j; k++) r[idx[k][1]] = avg;
+    i = j + 1;
+  }
+  return r;
+}
+
+/** Pearson correlation of two equal-length number arrays. */
+function pearson(a, b) {
+  const n = a.length;
+  const ma = a.reduce((s, x) => s + x, 0) / n;
+  const mb = b.reduce((s, x) => s + x, 0) / n;
+  let num = 0, da = 0, db = 0;
+  for (let i = 0; i < n; i++) { num += (a[i] - ma) * (b[i] - mb); da += (a[i] - ma) ** 2; db += (b[i] - mb) ** 2; }
+  return da === 0 || db === 0 ? 0 : num / Math.sqrt(da * db);
+}
+
+/** Spearman rank correlation: Pearson of the ranks. */
+const spearman = (a, b) => pearson(ranksOf(a), ranksOf(b));
+
+/** Least squares beta for design `X` (each row with an intercept) and target `y`, by Gaussian elimination. */
+function ols(X, y) {
+  const k = X[0].length;
+  const A = Array.from({ length: k }, () => new Array(k + 1).fill(0));
+  for (let i = 0; i < X.length; i++) {
+    for (let a = 0; a < k; a++) {
+      for (let b = 0; b < k; b++) A[a][b] += X[i][a] * X[i][b];
+      A[a][k] += X[i][a] * y[i];
+    }
+  }
+  for (let c = 0; c < k; c++) {
+    let piv = c;
+    for (let r = c + 1; r < k; r++) if (Math.abs(A[r][c]) > Math.abs(A[piv][c])) piv = r;
+    [A[c], A[piv]] = [A[piv], A[c]];
+    const d = A[c][c];
+    for (let j = c; j <= k; j++) A[c][j] /= d;
+    for (let r = 0; r < k; r++) {
+      if (r === c) continue;
+      const f = A[r][c];
+      for (let j = c; j <= k; j++) A[r][j] -= f * A[c][j];
+    }
+  }
+  return A.map((row) => row[k]);
+}
+
+/** The design row for one live token and one predictor. */
+function designRow(p, kind) {
+  const age = ageDays(snapAsOf(p), p.listed_at) ?? 0;
+  const ch = p.change_7d ?? 0;
+  const lt = logOf(p.tvl_usd);
+  if (kind === 'tvl') return [1, lt];
+  if (kind === 'three') return [1, lt, age, ch];
+  return [1, lt, age, ch, lt * lt];
+}
+
+/** `as_of` for the age term: the same day the page was built on. */
+let SNAP_AS_OF = null;
+const snapAsOf = () => SNAP_AS_OF;
+
+const PREDICTORS = [
+  { key: 'tvl', label: 'TVL alone' },
+  { key: 'three', label: 'log TVL + age + 7-day change' },
+  { key: 'quadratic', label: 'same, with a quadratic term' },
+];
+
+/**
+ * Leave-one-out validation of the model against the snapshot's live-token protocols. Both this page
+ * and main.ts run it from the same snapshot, so validation.json and the Model tab agree.
+ */
+export function validate(snap) {
+  SNAP_AS_OF = snap.as_of;
+  const live = snap.protocols.filter((p) => p.mcap_usd > 0 && p.tvl_usd > 0);
+  const n = live.length;
+  const y = live.map((p) => logOf(p.mcap_usd));
+  const truthTop = new Set(
+    live.map((p, i) => [p.mcap_usd, i]).sort((a, b) => b[0] - a[0]).slice(0, 10).map(([, i]) => i),
+  );
+  const predictors = PREDICTORS.map((pred) => {
+    const predicted = new Array(n);
+    for (let i = 0; i < n; i++) {
+      const train = live.filter((_, j) => j !== i);
+      const X = train.map((p) => designRow(p, pred.key));
+      const yy = train.map((p) => logOf(p.mcap_usd));
+      const beta = ols(X, yy);
+      predicted[i] = designRow(live[i], pred.key).reduce((s, v, j) => s + v * beta[j], 0);
+    }
+    const top = new Set(
+      predicted.map((v, i) => [v, i]).sort((a, b) => b[0] - a[0]).slice(0, 10).map(([, i]) => i),
+    );
+    const overlap = [...truthTop].filter((i) => top.has(i)).length;
+    const ratios = predicted.map((v, i) => Math.exp(y[i] - v)).sort((a, b) => a - b);
+    const at = (q) => ratios[Math.min(ratios.length - 1, Math.round(q * (ratios.length - 1)))];
+    return { key: pred.key, label: pred.label, spearman: r4(spearman(y, predicted)), top10_overlap: overlap, band_low: r4(at(0.1)), band_high: r4(at(0.9)) };
+  });
+  const three = predictors.find((p) => p.key === 'three');
+  return {
+    model: MODEL.version,
+    as_of: snap.as_of,
+    n,
+    band: { low: three.band_low, high: three.band_high, coverage: 0.8, n },
+    predictors,
+  };
 }
