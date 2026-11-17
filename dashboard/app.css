@@ -97,8 +97,4 @@ td.val-cell { color: var(--gold); font-weight: 600; }
 .prose { max-width: 860px; color: var(--muted); }
 .prose h2 { color: var(--ink); font-size: 16px; margin: 18px 0 6px; }
 .prose code { font-family: var(--mono); color: var(--gold); }
-.val-tbl { border-collapse: collapse; margin: 8px 0 12px; font-size: 13px; }
-.val-tbl th, .val-tbl td { padding: 5px 14px 5px 0; border-bottom: 1px solid var(--line); position: static; background: none; }
-.val-tbl th { color: var(--muted); font-weight: 500; }
-.val-tbl tr.win td { color: var(--ink); font-weight: 600; }
 .foot { padding: 8px 28px 14px; color: var(--faint); font-size: 11px; }

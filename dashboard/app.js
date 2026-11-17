@@ -17,14 +17,10 @@ if (!snap) {
   throw new Error('data.js missing');
 }
 const R = buildRadar(snap);
-const implieds = R.rows.map((r) => r.implied_value_usd);
-const maxLog = Math.log10(Math.max(...implieds));
-const minLog = Math.log10(Math.min(...implieds));
-// validation.json and data.js are written by main.ts beside the page; both are optional when the page
-// is opened straight from the repo, in which case the Model tab says where to find them.
-const validation = window.VALIDATION ?? null;
+const maxLog = Math.log10(R.rows[0].implied_value_usd);
+const minLog = Math.log10(R.rows[R.rows.length - 1].implied_value_usd);
 
-$('#meta').innerHTML = `Snapshot ${esc(R.as_of)} · ${esc(R.source)}<br>Model ${MODEL.version} · ranked by TVL · same code writes board.json`;
+$('#meta').innerHTML = `Snapshot ${esc(R.as_of)} · ${esc(R.source)}<br>Model ${MODEL.version} · same code writes board.json`;
 const below = R.rows.filter((r) => !r.watchlist).length;
 $('#stats').innerHTML = [
   [R.rows.length, 'ranked, no token recorded'],
@@ -41,7 +37,7 @@ const cats = [...new Set(R.rows.map((r) => r.category ?? '(none)'))].sort();
 const chains = [...new Set(R.rows.flatMap((r) => r.chains))].sort();
 const COLS = [
   ['rank', '#', ''], ['name', 'Protocol', ''], ['chains', 'Chains', ''], ['tvl_usd', 'TVL', 'num'], ['change_7d', '7d TVL', 'num'],
-  ['age_days', 'Tokenless run', 'num'], ['multiple', 'Multiple', 'num'], ['implied_value_usd', 'implied value (illustrative)', 'num'],
+  ['age_days', 'Tokenless run', 'num'], ['multiple', 'Multiple', 'num'], ['implied_value_usd', 'Implied launch value', 'num'],
   ['per_1k_usd', 'Per $1k*', 'num'], ['hold', 'Plan', 'num'],
 ];
 const get = (r, k) => k === 'hold' ? r.plan.hold_days : k === 'chains' ? r.chains.length : r[k];
@@ -135,16 +131,16 @@ function openDetail(slug) {
   const above = pos > 0 ? R.rows[pos - 1] : null;
   detail.innerHTML = `
   <div class="d-head"><div>
-    <div class="sub">Rank ${r.rank} of ${R.rows.length} by TVL${r.watchlist ? ' · on the watchlist' : ' · below the floor, not on the watchlist'}</div>
+    <div class="sub">Rank ${r.rank} of ${R.rows.length}${r.watchlist ? ' · on the watchlist' : ' · below the floor, not on the watchlist'}</div>
     <h2 id="d-title">${esc(r.name)}</h2>
     <div class="sub">${esc(r.category ?? 'no category recorded')} · ${r.chains.length ? esc(r.chains.join(', ')) : 'no chain recorded'}</div>
   </div><button class="close" id="close">Close ✕</button></div>
   <div class="d-grid">
     <div>
-      <div class="card"><h3>implied value (illustrative)</h3>
+      <div class="card"><h3>Implied launch value</h3>
         <div class="hero">${full(r.implied_value_usd)}</div>
         <div class="eq">${usd(r.tvl_usd)} TVL × ${x(r.multiple)} multiple × ${r.growth.toFixed(3)} growth × ${r.run.toFixed(3)} run</div>
-        <p class="note">${above ? `Ranks below ${esc(above.name)} (${usd(above.tvl_usd)} TVL).` : 'The board’s largest protocol by TVL.'} An illustration, not the sort key. Records no token: no CoinGecko id, symbol or market cap in DefiLlama’s record.</p>
+        <p class="note">${above ? `Ranks below ${esc(above.name)} (${usd(above.implied_value_usd)}).` : 'The board’s most valuable protocol.'} Records no token: no CoinGecko id, symbol or market cap in DefiLlama’s record.</p>
       </div>
       <div class="card" style="margin-top:12px"><h3>The numbers behind the rank</h3>
         <div class="kv">
@@ -187,31 +183,10 @@ function renderAside() {
   ${R.aside.map((p) => `<tr><td class="name">${esc(p.name)}</td><td class="sub">${esc(p.category ?? 'none recorded')}</td><td class="num">${usd(p.tvl_usd)}</td><td class="sub">${esc(p.why)}</td></tr>`).join('')}
   </tbody></table></div>`;
 }
-// The board is ordered by TVL because TVL is the only predictor that survives a leave-one-out test on
-// the snapshot's own live tokens. This block renders from validation.json (written by main.ts from the
-// same model.js), never from text typed into the page; without it, it says so.
-function validationSection() {
-  if (!validation || !Array.isArray(validation.predictors)) {
-    return `<h2>Why we do not rank by implied value</h2>
-    <p>validation.json is written by <code>main.ts</code> beside the page; open the page from its output directory to see the leave-one-out test that sets the ordering.</p>`;
-  }
-  const rows = validation.predictors.map((p) => {
-    const best = p.key === 'tvl';
-    return `<tr${best ? ' class="win"' : ''}><td>${esc(p.label)}</td><td class="num">${p.spearman.toFixed(3)}</td><td class="num">${p.top10_overlap}/10</td></tr>`;
-  }).join('');
-  const { band } = validation;
-  return `<h2>Why we do not rank by implied value</h2>
-  <p>Each predictor below was fit on every live token but one and asked to predict the market cap of the one it had not seen (leave-one-out, on the ${validation.n} protocols in the snapshot with both a market cap and a TVL). Raw TVL ranks them best, and the implied value does not:</p>
-  <table class="val-tbl"><thead><tr><th>predictor (leave-one-out)</th><th class="num">Spearman vs actual mcap</th><th class="num">top-10 overlap</th></tr></thead><tbody>${rows}</tbody></table>
-  <p>80% band: ${band.low.toFixed(2)}×–${band.high.toFixed(2)}×, covers ${(band.coverage * 100).toFixed(0)}% of ${band.n} live tokens.</p>
-  <p>Ranking by TVL is the only ordering that survives the test, so the board uses it.</p>`;
-}
-
 function renderModel() {
   view.innerHTML = `<div class="prose">
-  ${validationSection()}
   <h2>Implied launch value</h2>
-  <p><code>value = TVL × category multiple × growth × tokenless run</code>, using only the snapshot’s own fields. The same function in <code>model.js</code> writes board.json and draws this page. No protocol name is special-cased. An implied value is shown on each row and in its detail view as an illustration; it does not set the order.</p>
+  <p><code>value = TVL × category multiple × growth × tokenless run</code>, using only the snapshot’s own fields. The same function in <code>model.js</code> writes board.json and draws this page. No protocol name is special-cased.</p>
   <h2>Category multiple, from the market</h2>
   <p>For the ${R.live.length} protocols whose token trades, market cap ÷ TVL is a price the market already sets. A category’s multiple is the median of its peers, blended in log space with the median over all of them (${x(R.global_multiple)}), with weight n against ${MODEL.shrink_k}: a category with one peer leans on the overall median, one with fifteen leans on its own. Clamped to ${MODEL.multiple_min}–${MODEL.multiple_max}×.</p>
   <h2>Growth</h2>
@@ -221,7 +196,7 @@ function renderModel() {
   <h2>What is on the board</h2>
   <p>All ${R.watch_n} watchlist protocols, plus every protocol below the ${usd(R.floor_usd)} floor that records no token and passes the watchlist’s product tests (category, version marker, wrapped/staked wording, exchange name). Above the floor, a tokenless protocol that passes those tests but is off the watchlist can only have been left out for a parent protocol on record, so it is set aside too. The snapshot has no parent field below the floor, so a row there may still be a child product.</p>
   <h2>Limits</h2>
-  <p>The value is a claim about the record as it stands, not a forecast of whether or when a token launches. Farm-plan gas and position sizes are assumptions and are labelled as such. The board is ordered by TVL, the one predictor the test above found sound.</p></div>`;
+  <p>The value is a claim about the record as it stands, not a forecast of whether or when a token launches. Farm-plan gas and position sizes are assumptions and are labelled as such.</p></div>`;
 }
 
 const TABS = { board: renderBoard, live: renderLive, aside: renderAside, model: renderModel };

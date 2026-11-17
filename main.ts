@@ -1,12 +1,10 @@
 // Token Radar entry for make.fun token-radar-01 (Node 22, standard library only).
 //
 // Reads the sealed snapshot (/input/snapshot.json, or --input <file|dir>), ranks every protocol that
-// records no token by its TVL (dashboard/model.js, the same code the page runs), and writes to /output
-// (or MAKEFUN_OUTPUT_DIR, or --output <dir>):
-//   board.json    the TVL-ranked rows with farm steps
-//   validation.json  the leave-one-out test that says TVL outranks implied value
+// records no token by the implied value of its launch (dashboard/model.js, the same code the page runs),
+// and writes to /output (or MAKEFUN_OUTPUT_DIR, or --output <dir>):
+//   board.json    the ranked rows with farm steps
 //   data.js       the snapshot as one script the page reads, no fetch and no network
-//   validation.data.js  validation.json as the same kind of script for the page
 //   dashboard/    the static page
 //   screenshots/  three captures of it
 //   dossier.json  what the judge reads, written by vendor/makefun-board.ts
@@ -17,7 +15,6 @@ import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSyn
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { boardIssue, makeBoard, parseSnapshot } from './lib/model.ts';
-import { validate } from './dashboard/model.js';
 import { buildDossier } from './vendor/makefun-board.ts';
 
 const here = fileURLToPath(new URL('.', import.meta.url));
@@ -42,18 +39,13 @@ const out = arg('output', process.env.MAKEFUN_OUTPUT_DIR ?? '/output');
 
 const snapshot = parseSnapshot(readFileSync(inputFile, 'utf8'));
 const { radar, board } = makeBoard(snapshot);
-const validation = validate(snapshot);
 const issue = boardIssue(board, snapshot);
 if (issue !== null) fail(`the board breaks the gate: ${issue}`);
 
 mkdirSync(out, { recursive: true });
-writeFileSync(join(out, 'board.json'), `${JSON.stringify({ model: 'radar-comps-1', as_of: snapshot.as_of, sorted_by: 'tvl_usd', rows: board })}\n`);
-// validation.json is the leave-one-out test the Model tab renders: written here from the snapshot, not hand-typed.
-writeFileSync(join(out, 'validation.json'), `${JSON.stringify(validation)}\n`);
+writeFileSync(join(out, 'board.json'), `${JSON.stringify({ model: 'radar-comps-1', as_of: snapshot.as_of, rows: board })}\n`);
 // The page recomputes the radar from the snapshot with the same model.js, so it ships the input itself.
 writeFileSync(join(out, 'data.js'), `window.SNAPSHOT=${JSON.stringify(snapshot)};\n`);
-// validation.data.js carries the same object to the page as a script, so the page needs no fetch.
-writeFileSync(join(out, 'validation.data.js'), `window.VALIDATION=${JSON.stringify(validation)};\n`);
 
 /** Copy a directory's regular files (no dot-names) into `to`, sorted so both runs match. */
 function copyFiles(from: string, to: string): string[] {
@@ -75,5 +67,5 @@ writeFileSync(join(out, 'dossier.json'), buildDossier(out, { text_max_bytes: 65_
 process.stdout.write(
   `token radar: ${snapshot.protocols.length} protocols, ${radar.rows.length} ranked (${snapshot.watchlist.length} watchlist, ${radar.rows.length - snapshot.watchlist.length} below the floor), ` +
     `${radar.live.length} live-token comparables, ${radar.aside.length} wrapped/staked/bridged set aside\n` +
-    `token radar: wrote board.json, validation.json, data.js, dashboard/ (${pages.length} files), screenshots/ (${shots.length}) and dossier.json to ${out}\n`,
+    `token radar: wrote board.json, data.js, dashboard/ (${pages.length} files), screenshots/ (${shots.length}) and dossier.json to ${out}\n`,
 );

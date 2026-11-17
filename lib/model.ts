@@ -88,8 +88,8 @@ export function boardIssue(board: BoardRow[], snapshot: Snapshot): string | null
   if (missing.length) return `the board misses watchlist slugs: ${missing.slice(0, 5).join(', ')}`;
   for (let i = 0; i < board.length; i++) {
     if (board[i]!.rank !== i + 1) return `row ${i} has rank ${board[i]!.rank}`;
-    if (i > 0 && board[i]!.tvl_usd > board[i - 1]!.tvl_usd) return `rank ${i + 1} has more TVL than rank ${i}`;
+    if (i > 0 && board[i]!.implied_value_usd > board[i - 1]!.implied_value_usd) return `rank ${i + 1} is worth more than rank ${i}`;
   }
-  if (board[0]!.tvl_usd === board[board.length - 1]!.tvl_usd) return 'every row has the same TVL, so the order means nothing';
+  if (board[0]!.implied_value_usd === board[board.length - 1]!.implied_value_usd) return 'every row has the same implied value';
   return null;
 }
