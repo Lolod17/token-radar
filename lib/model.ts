@@ -38,17 +38,17 @@ export interface BoardRow {
   change_7d: number | null;
   age_days: number;
   age_assumed: boolean;
-  multiple: number;
-  multiple_lo: number;
-  multiple_hi: number;
-  multiple_n: number;
-  multiple_source: string;
+  base_usd: number;
+  curve_ratio: number;
+  ratio_lo: number;
+  ratio_hi: number;
   growth_mult: number;
   maturity: number;
   low_usd: number;
   high_usd: number;
-  per_1k_usd: number;
+  drop_per_1k_usd: number;
   gas_total_usd: number;
+  net_if_launch_usd: number;
   net_per_hour_usd: number;
   hold_days: number;
   missing_fields: string[];
@@ -84,17 +84,17 @@ export function makeBoard(snapshot: Snapshot): { radar: ReturnType<typeof buildR
     change_7d: r.change_7d,
     age_days: r.age_days,
     age_assumed: r.age_assumed,
-    multiple: r.multiple,
-    multiple_lo: r.multiple_lo,
-    multiple_hi: r.multiple_hi,
-    multiple_n: r.multiple_n,
-    multiple_source: r.multiple_source,
+    base_usd: r.base_usd,
+    curve_ratio: r.curve_ratio,
+    ratio_lo: r.ratio_lo,
+    ratio_hi: r.ratio_hi,
     growth_mult: r.growth_mult,
     maturity: r.maturity,
     low_usd: r.low_usd,
     high_usd: r.high_usd,
-    per_1k_usd: r.per_1k_usd,
+    drop_per_1k_usd: r.drop_per_1k_usd,
     gas_total_usd: r.gas_total_usd,
+    net_if_launch_usd: r.net_if_launch_usd,
     net_per_hour_usd: r.net_per_hour_usd,
     hold_days: r.hold_days,
     missing_fields: r.missing,

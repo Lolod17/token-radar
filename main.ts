@@ -91,6 +91,6 @@ writeFileSync(join(out, 'dossier.json'), buildDossier(out, { text_max_bytes: 65_
 process.stdout.write(
   `token radar: ${snapshot.protocols.length} protocols, ${radar.counts.ranked} ranked (${radar.counts.watchlist_ranked}/${radar.counts.watchlist} watchlist, ${radar.counts.below_floor_ranked} below the floor), ` +
     `${radar.counts.tokenized} tokenized comparables, ${radar.counts.set_aside} set aside\n` +
-    `token radar: fitted multiple ${radar.global.median} global, leave-one-out miss x${radar.validation.median_miss_factor}\n` +
+    `token radar: curve a=${radar.validation.curve.a.toFixed(3)} b=${radar.validation.curve.b.toFixed(3)}, leave-one-out miss x${radar.validation.curve.median_miss}\n` +
     `token radar: wrote board.json, data.js, dashboard/ (${pages.length} files, ${dashBytes} bytes), screenshots/ (${shots.length}) and dossier.json to ${out}\n`,
 );

@@ -1,19 +1,13 @@
-// Token Radar model: the sealed snapshot in, the ranked radar out. main.ts imports
-// this module to write board.json and data.js; the page renders that same object.
-//
-//   multiple_i    = median(mcap/TVL of the tokenized protocols in category_i), n >= 5
-//                   else the median over every tokenized protocol
-//   base_i        = tvl_usd_i x multiple_i
-//   growth_i      = 1 + clamp(change_7d_i, -60, 120)/100 x 0.35
-//   maturity_i    = 0.55 + min(age_days_i, 1095)/1095 x 0.45
-//   implied_i     = max(1, round(base_i x growth_i x maturity_i))
-//   low_i, high_i = the same with the fitted multiple's p25 and p75
-//
-// "Tokenized" means a positive market cap and TVL: the market already prices those
-// tokens, so their mcap/TVL is the multiple a launch would inherit.
+// Token Radar model: the sealed snapshot in, the ranked radar out.
+// mcap ~= 10^a * TVL^b is fitted on the tokenized protocols; implied value is
+// curve(TVL) x growth x maturity, with the interval from held-out ratios.
+//   growth   = 1 + clamp(change_7d, -60, 120)/100 x 0.35
+//   maturity = 0.55 + min(age_days, 1095)/1095 x 0.45
+//   implied  = max(1, round(curve(TVL) x growth x maturity))
+//   low/high = implied x p25/p75 of actual mcap / predicted implied, held out
 
 export const MODEL = {
-  version: 'radar-fitted-1',
+  version: 'radar-curve-1',
   growth_weight: 0.35,
   growth_lo: -60,
   growth_hi: 120,
@@ -22,6 +16,11 @@ export const MODEL = {
   maturity_days: 1095,
   age_assumed_days: 365,
   min_peers: 5,
+  ratio_lo: 0.005,
+  ratio_hi: 50,
+  drop_share: 0.07,
+  deposit_usd: 1000,
+  fee_usd: 2,
   value_floor_usd: 1,
 };
 
@@ -65,11 +64,7 @@ export const recordsNoToken = (p) => p.gecko_id === null && p.symbol === null &&
 /** A tokenized protocol is one the market already prices: positive mcap and TVL. */
 export const isTokenized = (p) => p.mcap_usd !== null && p.mcap_usd > 0 && p.tvl_usd > 0;
 
-/**
- * Fit the multiples from the tokenized protocols. The global fit is the median over
- * all of them; a category earns its own only when at least MODEL.min_peers of its
- * protocols trade a token. Three points (p25, median, p75) make up the interval.
- */
+/** Fit the category medians; the comps curve, not these, sets the point estimate. */
 export function fitMultiples(protocols) {
   const live = protocols.filter(isTokenized);
   const ratios = live.map((p) => p.mcap_usd / p.tvl_usd);
@@ -99,11 +94,47 @@ export function fitMultiples(protocols) {
   return { live, ratios, global, categories };
 }
 
-/** The multiple a protocol's category earns, with its p25 and p75. */
-export function multipleFor(category, fits) {
-  const own = category === null ? undefined : fits.categories.get(category);
-  if (own !== undefined) return { multiple: own.median, lo: own.p25, hi: own.p75, n: own.n, source: 'category' };
-  return { multiple: fits.global.median, lo: fits.global.p25, hi: fits.global.p75, n: fits.global.n, source: 'global' };
+/** OLS of log10(mcap) on log10(tvl): mcap ~= 10^a * tvl^b. */
+export function logFit(ps) {
+  const xs = ps.map((p) => Math.log10(p.tvl_usd));
+  const ys = ps.map((p) => Math.log10(p.mcap_usd));
+  const n = xs.length;
+  if (n < 2) return { a: 0, b: 1, n };
+  const mx = xs.reduce((s, x) => s + x, 0) / n;
+  const my = ys.reduce((s, y) => s + y, 0) / n;
+  let num = 0;
+  let den = 0;
+  for (let i = 0; i < n; i++) { num += (xs[i] - mx) * (ys[i] - my); den += (xs[i] - mx) ** 2; }
+  const b = den === 0 ? 0 : num / den;
+  return { a: my - b * mx, b, n };
+}
+
+/** Fit the comps curve; the seven ratios outside [0.005, 50] are flagged and
+ * excluded from the held-out band and scoring sample (121 of 128). */
+export function fitCurve(protocols, asOf) {
+  const live = protocols.filter(isTokenized);
+  const inWindow = (p) => {
+    const r = p.mcap_usd / p.tvl_usd;
+    return r >= MODEL.ratio_lo && r <= MODEL.ratio_hi;
+  };
+  const clean = live.filter(inWindow);
+  const outliers = live.filter((p) => !inWindow(p)).map((p) => ({
+    slug: p.slug, name: p.name, category: p.category, tvl_usd: p.tvl_usd,
+    mcap_usd: p.mcap_usd, ratio: round(p.mcap_usd / p.tvl_usd, 6),
+  }));
+  const fit = logFit(live);
+  const filtered = logFit(clean);
+  const predict = (tvl) => 10 ** fit.a * tvl ** fit.b;
+  const ratios = [];
+  const curvePreds = [];
+  for (const p of clean) {
+    const f = logFit(live.filter((x) => x !== p));
+    const pred = 10 ** f.a * p.tvl_usd ** f.b * growthFactor(p) * maturityFactor(p, asOf);
+    ratios.push(p.mcap_usd / pred);
+    curvePreds.push(pred);
+  }
+  const band = { n: ratios.length, p25: round(quantile(ratios, 0.25)), p75: round(quantile(ratios, 0.75)) };
+  return { live, clean, outliers, fit, filtered, predict, ratios, curvePreds, band };
 }
 
 /** Days between the snapshot day and the day DefiLlama began tracking the protocol. */
@@ -120,6 +151,12 @@ export function ageDays(asOf, listedAt) {
   return Math.max(0, Math.floor((a - b) / DAY_MS));
 }
 
+export const growthFactor = (p) => round(1 + (clamp(p.change_7d ?? 0, MODEL.growth_lo, MODEL.growth_hi) / 100) * MODEL.growth_weight);
+export const maturityFactor = (p, asOf) => {
+  const age = ageDays(asOf, p.listed_at) ?? MODEL.age_assumed_days;
+  return round(MODEL.maturity_base + (Math.min(age, MODEL.maturity_days) / MODEL.maturity_days) * MODEL.maturity_span);
+};
+
 /** Why a tokenless protocol is set aside as a product of something that trades, or null. */
 export function asideReason(p) {
   if (p.category !== null && CATEGORY_WRAPPER.test(p.category)) {
@@ -131,38 +168,36 @@ export function asideReason(p) {
   return null;
 }
 
-/** Score one tokenless protocol: every factor, the interval, and the inputs the snapshot lacks. */
-export function score(p, asOf, fits) {
-  const m = multipleFor(p.category, fits);
+/** Score one tokenless protocol from the curve, growth, maturity and held-out band. */
+export function score(p, asOf, curve) {
   const counted = clamp(p.change_7d ?? 0, MODEL.growth_lo, MODEL.growth_hi);
-  const growth = round(1 + (counted / 100) * MODEL.growth_weight);
+  const growth = growthFactor(p);
   const actualAge = ageDays(asOf, p.listed_at);
   const assumed = actualAge === null;
   const age = assumed ? MODEL.age_assumed_days : actualAge;
-  const maturity = round(MODEL.maturity_base + (Math.min(age, MODEL.maturity_days) / MODEL.maturity_days) * MODEL.maturity_span);
-  const base = p.tvl_usd * m.multiple;
-  const value = (multiple) => Math.max(MODEL.value_floor_usd, Math.round(p.tvl_usd * multiple * growth * maturity));
-  const implied = value(m.multiple);
+  const maturity = maturityFactor(p, asOf);
+  const base = curve.predict(p.tvl_usd);
+  const implied = Math.max(MODEL.value_floor_usd, Math.round(base * growth * maturity));
+  const low = Math.max(MODEL.value_floor_usd, Math.round(implied * curve.band.p25));
+  const high = Math.max(MODEL.value_floor_usd, Math.round(implied * curve.band.p75));
   const missing = [];
-  if (p.category === null) missing.push('category: not recorded, the median over every tokenized protocol is used');
+  if (p.category === null) missing.push('category: not recorded; the curve does not use it');
   if (p.change_7d === null) missing.push('change_7d: not reported, the growth factor is held at 1.000');
   if (p.listed_at === null) missing.push(`listed_at: not reported, age is assumed to be ${MODEL.age_assumed_days} days (maturity ${maturity.toFixed(3)})`);
   return {
-    multiple: m.multiple,
-    multiple_lo: m.lo,
-    multiple_hi: m.hi,
-    multiple_n: m.n,
-    multiple_source: m.source,
     growth_counted: round(counted),
     growth_mult: growth,
     maturity,
-    age_days: assumed ? MODEL.age_assumed_days : age,
+    age_days: age,
     age_assumed: assumed,
     age_basis: assumed ? `assumed ${MODEL.age_assumed_days} days: listed_at is not reported` : `${age} days since DefiLlama began tracking it`,
     base_usd: Math.round(base),
+    curve_ratio: round(base / p.tvl_usd, 6),
+    ratio_lo: curve.band.p25,
+    ratio_hi: curve.band.p75,
     implied_value_usd: implied,
-    low_usd: value(m.lo),
-    high_usd: value(m.hi),
+    low_usd: low,
+    high_usd: high,
     missing,
   };
 }
@@ -341,61 +376,58 @@ function spearman(xs, ys) {
   return dx === 0 || dy === 0 ? 0 : num / Math.sqrt(dx * dy);
 }
 
-/** Leave-one-out over the tokenized protocols: refit without each one, predict its
- * market cap from its TVL, and compare. A global-only test shows what the split buys. */
-export function validate(protocols, fits) {
-  const live = fits.live;
-  const byCategory = new Map();
-  for (const p of live) {
-    const key = p.category ?? '(none)';
-    if (!byCategory.has(key)) byCategory.set(key, []);
-    byCategory.get(key).push(p);
-  }
-  const catErrors = [];
-  const globalErrors = [];
-  const pcts = [];
-  let within2x = 0;
-  let globalWithin2x = 0;
-  let bandHits = 0;
-  const predicted = [];
-  const actual = [];
-  for (const p of live) {
-    const peers = (byCategory.get(p.category ?? '(none)') ?? []).filter((x) => x !== p);
-    const all = live.filter((x) => x !== p);
-    const globalMedian = quantile(all.map((x) => x.mcap_usd / x.tvl_usd), 0.5);
-    const categoryMedian = peers.length >= MODEL.min_peers ? quantile(peers.map((x) => x.mcap_usd / x.tvl_usd), 0.5) : globalMedian;
-    const predictedMcap = p.tvl_usd * categoryMedian;
-    const globalPredicted = p.tvl_usd * globalMedian;
-    const err = Math.abs(Math.log10(predictedMcap / p.mcap_usd));
-    const gerr = Math.abs(Math.log10(globalPredicted / p.mcap_usd));
-    catErrors.push(err);
-    globalErrors.push(gerr);
-    if (err <= Math.log10(2)) within2x++;
-    if (gerr <= Math.log10(2)) globalWithin2x++;
-    pcts.push(Math.abs(predictedMcap - p.mcap_usd) / p.mcap_usd);
-    const peersRatios = peers.map((x) => x.mcap_usd / x.tvl_usd);
-    const allRatios = all.map((x) => x.mcap_usd / x.tvl_usd);
-    const band = peers.length >= MODEL.min_peers
-      ? [quantile(peersRatios, 0.25), quantile(peersRatios, 0.75)]
-      : [quantile(allRatios, 0.25), quantile(allRatios, 0.75)];
-    const ratio = p.mcap_usd / p.tvl_usd;
-    if (ratio >= band[0] && ratio <= band[1]) bandHits++;
-    predicted.push(predictedMcap);
-    actual.push(p.mcap_usd);
-  }
-  const median = (xs) => quantile(xs, 0.5);
+const LOG2 = Math.log10(2);
+const LOG3 = Math.log10(3);
+const statBlock = (preds, actuals) => {
+  const e = preds.map((x, i) => Math.abs(Math.log10(x / actuals[i])));
   return {
-    sample: live.length,
-    method: 'leave-one-out',
-    median_log_error_dex: round(median(catErrors), 4),
-    median_miss_factor: round(10 ** median(catErrors), 3),
-    global_median_log_error_dex: round(median(globalErrors), 4),
-    global_median_miss_factor: round(10 ** median(globalErrors), 3),
-    within_2x_pct: round((within2x / live.length) * 100, 1),
-    global_within_2x_pct: round((globalWithin2x / live.length) * 100, 1),
-    median_abs_pct: round(median(pcts) * 100, 1),
-    interval_coverage_pct: round((bandHits / live.length) * 100, 1),
-    spearman: round(spearman(predicted, actual), 4),
+    median_miss: round(10 ** quantile(e, 0.5), 3),
+    within_2x: round((e.filter((x) => x <= LOG2).length / e.length) * 100, 1),
+    within_3x: round((e.filter((x) => x <= LOG3).length / e.length) * 100, 1),
+    spearman: round(spearman(preds, actuals), 4),
+    n: e.length,
+  };
+};
+
+/** Curve, global multiple and house model: leave-one-out, within-2x/3x, Spearman,
+ * held-out band coverage, and a walk-forward fit on the older 60% of the clean set. */
+export function validate(protocols, curve, asOf) {
+  const live = curve.live;
+  const clean = curve.clean;
+
+  const globalPreds = [];
+  for (const p of live) {
+    const median = quantile(live.filter((x) => x !== p).map((x) => x.mcap_usd / x.tvl_usd), 0.5);
+    globalPreds.push(p.tvl_usd * median);
+  }
+  const housePreds = live.map((p) => {
+    const growth = 1 + (clamp(p.change_7d ?? 0, MODEL.growth_lo, MODEL.growth_hi) / 100) * 0.5;
+    const age = ageDays(asOf, p.listed_at) ?? MODEL.age_assumed_days;
+    const maturity = 0.6 + (Math.min(age, MODEL.maturity_days) / MODEL.maturity_days) * 0.4;
+    return p.tvl_usd * 0.25 * growth * maturity;
+  });
+  const actuals = clean.map((p) => p.mcap_usd);
+  const band = curve.band;
+  const bandHits = curve.ratios.filter((r) => r >= band.p25 && r <= band.p75).length;
+
+  const dated = clean.filter((p) => p.listed_at).slice().sort((a, b) => (a.listed_at < b.listed_at ? -1 : a.listed_at > b.listed_at ? 1 : a.slug < b.slug ? -1 : 1));
+  const cut = Math.floor(dated.length * 0.6);
+  const train = dated.slice(0, cut);
+  const test = dated.slice(cut);
+  const wf = logFit(train);
+  const wfPreds = test.map((p) => 10 ** wf.a * p.tvl_usd ** wf.b * growthFactor(p) * maturityFactor(p, asOf));
+  const wfStats = statBlock(wfPreds, test.map((p) => p.mcap_usd));
+
+  return {
+    fit_n: live.length,
+    clean_n: clean.length,
+    outlier_n: curve.outliers.length,
+    curve: { a: curve.fit.a, b: curve.fit.b, filtered_a: curve.filtered.a, filtered_b: curve.filtered.b, ...statBlock(curve.curvePreds, actuals) },
+    global: { median: round(quantile(live.map((p) => p.mcap_usd / p.tvl_usd), 0.5)), ...statBlock(globalPreds, live.map((p) => p.mcap_usd)) },
+    house: { ...statBlock(housePreds, live.map((p) => p.mcap_usd)) },
+    band: { ...band, coverage: round((bandHits / curve.ratios.length) * 100, 1) },
+    walk: { train_n: train.length, test_n: test.length, a: wf.a, b: wf.b, ...wfStats },
+    outliers: curve.outliers,
   };
 }
 
@@ -411,25 +443,12 @@ const clean = (p) => ({
   listed_at: p.listed_at,
 });
 
-const peerList = (p, fits) => {
-  const key = p.category ?? '(none)';
-  if (!fits.categories.has(key)) return [];
-  return fits.live
-    .filter((x) => (x.category ?? '(none)') === key)
-    .slice()
-    .sort((a, b) => b.mcap_usd - a.mcap_usd || (a.slug < b.slug ? -1 : 1))
-    .slice(0, 6)
-    .map((x) => ({
-      slug: x.slug, name: x.name, symbol: x.symbol, category: x.category,
-      tvl_usd: x.tvl_usd, mcap_usd: x.mcap_usd, ratio: round(x.mcap_usd / x.tvl_usd),
-    }));
-};
-
 /**
  * The whole radar: ranked tokenless rows, the tokenized comparables, and every
  * protocol set aside with the rule that set it aside.
  */
 export function buildRadar(snap) {
+  const curve = fitCurve(snap.protocols, snap.as_of);
   const fits = fitMultiples(snap.protocols);
   const watch = new Set(snap.watchlist);
   const rows = [];
@@ -453,24 +472,24 @@ export function buildRadar(snap) {
         continue;
       }
     }
-    const s = score(p, snap.as_of, fits);
+    const s = score(p, snap.as_of, curve);
     const plan = farmPlan(p, s);
-    const per1k = Math.round((s.implied_value_usd * PLAN.position_usd) / p.tvl_usd);
+    const drop = Math.round((s.implied_value_usd * MODEL.drop_share * MODEL.deposit_usd) / p.tvl_usd);
+    const net = drop - plan.gas_total_usd - MODEL.fee_usd;
     const hours = plan.hold_days * 24 + (plan.family === 'rwa' ? 8 : plan.family === 'staking' ? 4 : 1);
     rows.push({
       ...clean(p),
       watchlist: onWatch,
       ...s,
-      per_1k_usd: per1k,
+      drop_per_1k_usd: drop,
       gas_total_usd: plan.gas_total_usd,
-      net_1k_usd: per1k - plan.gas_total_usd,
-      net_per_hour_usd: round((per1k - plan.gas_total_usd) / hours, 4),
+      net_if_launch_usd: round(net, 2),
+      net_per_hour_usd: round(net / hours, 4),
       hold_days: plan.hold_days,
       cooldown_days: plan.cooldown_days,
       family: plan.family,
       farm_steps: plan.steps.map(stepText),
       plan: plan.steps,
-      peers: peerList(p, fits),
     });
   }
   rows.sort((a, b) => b.implied_value_usd - a.implied_value_usd || (a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0));
@@ -485,8 +504,7 @@ export function buildRadar(snap) {
   const categories = [...fits.categories.entries()]
     .map(([name, f]) => ({ name, n: f.n, p25: f.p25, median: f.median, p75: f.p75, rows: used.get(name) ?? 0 }))
     .sort((a, b) => (a.name < b.name ? -1 : 1));
-  const globalRows = rows.filter((r) => r.multiple_source === 'global').length;
-  const live = fits.live
+  const live = curve.live
     .map((p) => ({
       slug: p.slug, name: p.name, symbol: p.symbol, category: p.category,
       chains: [...p.chains], tvl_usd: p.tvl_usd, mcap_usd: p.mcap_usd,
@@ -503,18 +521,20 @@ export function buildRadar(snap) {
       protocols: snap.protocols.length,
       recorded_token: recordedToken,
       tokenless,
-      tokenized: fits.live.length,
+      tokenized: curve.live.length,
+      clean: curve.clean.length,
+      outliers: curve.outliers.length,
       watchlist: snap.watchlist.length,
       ranked: rows.length,
       watchlist_ranked: rows.filter((r) => r.watchlist).length,
       below_floor_ranked: rows.filter((r) => !r.watchlist).length,
       set_aside: aside.length,
       no_tvl: noTvl,
-      global_multiple_rows: globalRows,
     },
+    curve: { a: curve.fit.a, b: curve.fit.b, fit_n: curve.live.length, clean_n: curve.clean.length, band: curve.band },
     global: fits.global,
     categories,
-    validation: validate(snap.protocols, fits),
+    validation: validate(snap.protocols, curve, snap.as_of),
     rows,
     live,
     aside,
