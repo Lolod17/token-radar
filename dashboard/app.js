@@ -23,6 +23,7 @@ if (!R) {
 }
 
 $('#stamp').innerHTML = `<b>SNAPSHOT</b> ${esc(R.as_of)} &middot; ${R.counts.protocols} protocols<br><b>SOURCE</b> DefiLlama &middot; <b>MODEL</b> ${esc(R.model)}`;
+const topCats = [...R.categories].sort((a, b) => b.rows - a.rows || cmpStr(a.name, b.name)).slice(0, 4);
 $('#kpis').innerHTML = [
   [R.counts.ranked, 'pre-token protocols ranked'],
   [`${R.counts.watchlist_ranked}/${R.counts.watchlist}`, 'watchlist covered'],
@@ -31,7 +32,7 @@ $('#kpis').innerHTML = [
   [x2(R.validation.median_miss_factor), 'leave-one-out median miss'],
   [R.counts.set_aside, 'set aside, each with a reason'],
 ].map(([b, s]) => `<div class="kpi"><b>${b}</b><span>${s}</span></div>`).join('');
-$('#methodbar').innerHTML = `<div class="f">value = TVL <i>×</i> category median mcap/TVL <i>×</i> growth <i>×</i> maturity</div><span>fitted on ${R.counts.tokenized} tokenized protocols &middot; 7d ×${MODEL.growth_weight} within ±${-MODEL.growth_lo}/${MODEL.growth_hi}% &middot; maturity ${MODEL.maturity_base}→1.00 over ${MODEL.maturity_days / 365}y</span><button class="go" id="goMethod">Method &amp; validation →</button>`;
+$('#methodbar').innerHTML = `<div class="mtext"><div class="f">value = TVL <i>×</i> category median mcap/TVL <i>×</i> growth <i>×</i> maturity</div><div class="f2">fitted medians: ${topCats.map((k) => `${esc(k.name)} ${x(k.median)}`).join(' · ')} · global ${x(R.global.median)} (n=${R.global.n})</div></div><button class="go" id="goMethod">Method &amp; validation →</button>`;
 
 // ---------------------------------------------------------------- board
 
@@ -172,7 +173,7 @@ function openDetail(slug) {
     <div class="dvalue">
       <div class="big">${full(r.implied_value_usd)}</div>
       <div class="eq">${full(r.tvl_usd)} TVL × ${x(r.multiple)} × ${r.growth_mult.toFixed(3)} growth × ${r.maturity.toFixed(3)} maturity</div>
-      <div class="note">Base ${full(r.base_usd)} × growth ${r.growth_mult.toFixed(3)} × maturity ${r.maturity.toFixed(3)}. The interval below is the same equation at the category's p25 and p75 multiples.</div>
+      <div class="note">Base ${full(r.base_usd)} × growth ${r.growth_mult.toFixed(3)} × maturity ${r.maturity.toFixed(3)}. The interval below is the same equation at the fitted multiple's p25 and p75.</div>
     </div>
     <div class="dband">
       <div class="lab">P25–P75 interval · where the same model puts this launch</div>
@@ -198,11 +199,13 @@ function openDetail(slug) {
           <div class="row"><div class="l"><span class="k">Net $/h</span><span class="e">(${full(r.per_1k_usd)} − ${one(r.gas_total_usd)} gas) ÷ ${r.hold_days}d hold</span></div><span class="v">${one(r.net_per_hour_usd)}</span></div>
         </div>
       </div>
+      <div class="card"><h3>How the multiple is validated</h3><p class="note">Leave-one-out over the same ${R.counts.tokenized} tokenized protocols: refit without each one and predict its market cap from its TVL. Median miss ${x2(R.validation.median_miss_factor)} (one global multiple: ${x2(R.validation.global_median_miss_factor)}); ${R.validation.within_2x_pct}% land within 2×, and the P25–P75 band holds ${R.validation.interval_coverage_pct}% of held-out tokens. The interval is the honest width of a token multiple, not decoration.</p></div>
       <div class="card"><h3>Why this multiple</h3>${peers}</div>
       ${r.missing.length ? `<div class="card warn"><h3>Assumptions for missing fields</h3><ul>${r.missing.map((m) => `<li>${esc(m)}</li>`).join('')}</ul></div>` : ''}
     </div>
     <div>
       <div class="card"><h3>Farm plan · ${r.plan.length} steps · ${r.hold_days}-day hold · ${r.cooldown_days}-day cooldown</h3>
+        <div class="plansum">capital ${full(PLAN.position_usd)} · gas ≈ ${one(r.gas_total_usd)} · hold ${r.hold_days} days · exit cooldown ${r.cooldown_days} days · ${r.plan.length} steps</div>
         <ol class="steps">${r.plan.map((s) => `<li>${esc(s.do)}<div class="chips"><span class="chip c">${esc(s.cost)}</span><span class="chip">${esc(s.time)}</span></div></li>`).join('')}</ol>
         <p class="note"><b>Assumptions, not snapshot data:</b> a ${full(PLAN.position_usd)} position, gas at ${esc(PLAN.gas_note)}, and the category minimum in step 3. Estimated gas for the whole plan is ${one(r.gas_total_usd)} on ${esc(r.chains[0] ?? 'the first chain')}. The ${r.hold_days}-day hold is longer for younger protocols; the exit names its own cooldown.</p>
       </div>
@@ -248,7 +251,7 @@ function renderMethod() {
     <div>growth_i <span>=</span> 1 + clamp(change_7d_i, ${MODEL.growth_lo}, ${MODEL.growth_hi}) / 100 × ${MODEL.growth_weight}</div>
     <div>maturity_i <span>=</span> ${MODEL.maturity_base} + min(age_days_i, ${MODEL.maturity_days}) / ${MODEL.maturity_days} × ${MODEL.maturity_span}</div>
     <div>implied_i <span>=</span> max(${MODEL.value_floor_usd}, round(base_i × growth_i × maturity_i))</div>
-    <div>interval_i <span>=</span> the same formula at the category's p25 and p75 multiples</div>
+    <div>interval_i <span>=</span> the same formula at the fitted multiple's p25 and p75 (category when n ≥ ${MODEL.min_peers}, else global)</div>
   </div>
   <p>Nothing here is a constant typed in by hand. The multiple is refitted from the snapshot's own ${c.tokenized} tokenized protocols every run; a category with fewer than ${MODEL.min_peers} tokenized peers borrows the global median. Growth counts a week of TVL change at ${MODEL.growth_weight}× and clamps it to ${MODEL.growth_lo}/${MODEL.growth_hi}%. Maturity rises from ${MODEL.maturity_base} to 1.00 over ${MODEL.maturity_days} days: TVL that has run three years without a token is treated as proven demand.</p>
   <div class="mgrid">
