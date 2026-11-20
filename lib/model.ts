@@ -2,7 +2,7 @@
 // model's output (dashboard/model.js) into board.json rows, and check the board
 // against every rule the gate scores before anything is written.
 
-import { buildRadar, stepText } from '../dashboard/model.js';
+import { buildRadar } from './radar.ts';
 
 export interface SnapshotProtocol {
   slug: string;
@@ -39,6 +39,8 @@ export interface BoardRow {
   age_days: number;
   age_assumed: boolean;
   base_usd: number;
+  odds: number;
+  if_launch_usd: number;
   curve_ratio: number;
   ratio_lo: number;
   ratio_hi: number;
@@ -85,6 +87,8 @@ export function makeBoard(snapshot: Snapshot): { radar: ReturnType<typeof buildR
     age_days: r.age_days,
     age_assumed: r.age_assumed,
     base_usd: r.base_usd,
+    odds: r.odds,
+    if_launch_usd: r.if_launch_usd,
     curve_ratio: r.curve_ratio,
     ratio_lo: r.ratio_lo,
     ratio_hi: r.ratio_hi,
