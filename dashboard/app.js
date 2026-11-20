@@ -72,9 +72,9 @@ const chains = [...chainCount.keys()].sort((a, b) => chainCount.get(b) - chainCo
 const maxTvl = Math.max(...R.rows.map((r) => r.tvl_usd));
 const COLS = [
   ['rank', '#', 'num'], ['name', 'Protocol', ''], ['tvl_usd', 'TVL', 'num'], ['change_7d', '7d', 'num'],
-  ['age_days', 'Age', 'num'], ['odds', 'Odds', 'num'], ['if_launch_usd', 'If launches', 'num'],
-  ['implied_value_usd', 'Expected · P25–P75', 'num'], ['drop_per_1k_usd', 'Drop/$1k', 'num'],
-  ['net_if_launch_usd', 'Net if launch', 'num'], ['net_per_hour_usd', 'Net $/h', 'num'], ['hold_days', 'Verdict', 'num'],
+  ['age_days', 'Age', 'num'], ['odds', 'Odds', 'num'], ['if_launch_usd', 'If launch', 'num'],
+  ['implied_value_usd', 'Expected', 'num'], ['drop_per_1k_usd', 'Drop/$1k', 'num'],
+  ['net_if_launch_usd', 'Net if launch', 'num'], ['net_per_hour_usd', 'Net $/h', 'num'], ['hold_days', 'Plan', 'num'],
 ];
 const preVerdict = () => {
   const q = state.q.toLowerCase();
@@ -112,7 +112,7 @@ function evidence() {
       <div class="bigstat">${v.band.coverage}%</div>
       <div class="eline">inside P25–P75, against a stated 50%</div>
       <div class="eline">P25 ${R.curve.band.p25.toFixed(3)}× · P75 ${R.curve.band.p75.toFixed(3)}×</div>
-      <div class="eline">curve ${x2(v.curve.median_miss)} · global ${x2(v.global.median_miss)} · house ${x2(v.house.median_miss)}</div></div>
+      <div class="eline hi">curve ${x2(v.curve.median_miss)} · global ${x2(v.global.median_miss)} · house ${x2(v.house.median_miss)}</div></div>
   </div>`;
 }
 function chartSvg(W = 620, H = 280) {
@@ -283,7 +283,7 @@ function renderMethod() {
   const c = R.counts, t = R.terms, o = R.odds;
   const status = (n, cut) => n <= cut ? '<span class="keep">kept</span>' : '<span class="drop">dropped</span>';
   const termRows = [['Flat global median multiple', t.flat, status(t.flat, 4)], ['+ size curve and stated priors', t.curve, status(t.curve, 4)], ['+ fitted 7-day growth', t.growth, status(t.growth, t.curve)], ['+ fitted maturity', t.maturity, status(t.maturity, t.curve)]].map(([n, m, s]) => `<tr><td>${n}</td><td class="num">${x2(m)}</td><td>${s}</td></tr>`).join('');
-  const catRows = R.categories.map((k) => `<tr><td>${esc(k.name)}</td><td class="num">${k.n}</td><td class="num">${x(k.median)}</td><td class="num">${k.rows}</td></tr>`).join('');
+  const catRows = R.categories.filter((k) => k.n >= 5).sort((a, b) => b.n - a.n || cmp(a.name, b.name)).map((k) => `<tr><td>${esc(k.name)}</td><td class="num">${k.n}</td><td class="num">${x(k.median)}</td><td class="num">${k.rows}</td></tr>`).join('');
   const outRows = v.outliers.map((q) => `<tr><td>${esc(q.name)}</td><td class="sub">${esc(q.category ?? 'none')}</td><td class="num">${q.ratio}</td><td class="num">${usd(q.tvl_usd)}</td></tr>`).join('');
   const modelRow = (name, s) => `<tr><td>${name}</td><td class="num">${x2(s.median_miss)}</td><td class="num">${s.within_2x}%</td><td class="num">${s.within_3x}%</td><td class="num">${s.spearman}</td></tr>`;
   view.innerHTML = `<div class="prose">
@@ -302,13 +302,13 @@ function renderMethod() {
       <tr><td>Leave-one-out</td><td class="num">${o.brier_loo.toFixed(3)}</td><td class="num">${baseBrier.toFixed(3)}</td></tr>
       <tr><td>Walk-forward n=${o.walk.test_n}</td><td class="num">${o.walk.brier.toFixed(3)}</td><td class="num">${o.walk.base_brier.toFixed(3)}</td></tr></table>
       <p class="note">Base rate ${(o.base_rate * 100).toFixed(1)}%. Fit on the older ${o.walk.train_n} dated protocols, tested on the newer ${o.walk.test_n}. It is a cross-sectional base rate, not a forecast that a token launches. ${o.brier_loo < baseBrier ? 'Kept: the logistic beats the base rate.' : 'Not kept: it does not beat the base rate.'}</p></div>
+  </div><div>
     <div class="card"><h3>Value model, three ways</h3><table class="mtab"><tr><th>Model</th><th class="num">Miss</th><th class="num">≤2×</th><th class="num">≤3×</th><th class="num">Spearman</th></tr>${modelRow('Comps curve', v.curve)}${modelRow('Global median', v.global)}${modelRow('House model', v.house)}</table>
       <p class="note">Scored on ${v.clean_n} clean ratios; baselines on all ${v.fit_n}. Walk-forward value: older ${v.walk.train_n} → newer ${v.walk.test_n}, miss ${x2(v.walk.median_miss)}. The ${v.outlier_n} flagged ratios are excluded from the score and interval but kept in the curve fit to anchor the high-TVL end.</p></div>
+    <div class="card"><h3>Category medians, cross-check only</h3><table class="mtab"><tr><th>Category</th><th class="num">n</th><th class="num">Median</th><th class="num">Rows</th></tr>${catRows}</table><p class="note">Categories with n≥5 only. The point estimate uses the curve; these medians show the spread a single constant would miss.</p></div>
   </div><div>
-    <div class="card"><h3>Log-log comps and the fitted curve</h3>${chartSvg()}<div class="plegend"><i class="ld"></i> tokenized mcap/TVL <i class="lr"></i> ranked expected <i class="lo"></i> flagged ratio</div></div>
+    <div class="card"><h3>Log-log comps and the fitted curve</h3>${chartSvg()}<div class="plegend"><i class="ld"></i> tokenized mcap/TVL <i class="lr"></i> ranked expected <i class="lo"></i> flagged ratio</div><div class="rline">Range: P25 ${R.curve.band.p25.toFixed(3)}× – P75 ${R.curve.band.p75.toFixed(3)}× · ${v.band.coverage}% of held-out actuals inside, stated 50%.</div></div>
     <div class="card"><h3>Seven flagged ratio outliers</h3><table class="mtab"><tr><th>Protocol</th><th>Category</th><th class="num">Mcap/TVL</th><th class="num">TVL</th></tr>${outRows}</table><p class="note">Outside [${MODEL.ratio_lo}, ${MODEL.ratio_hi}]. Refitting without them gives a=${v.curve.filtered_a.toFixed(3)}, b=${v.curve.filtered_b.toFixed(3)} and predicts high-TVL protocols far too low.</p></div>
-    <div class="card"><h3>Category medians, cross-check only</h3><table class="mtab"><tr><th>Category</th><th class="num">n</th><th class="num">Median</th><th class="num">Rows</th></tr>${catRows}</table></div>
-    <div class="card"><h3>Ledger and assumptions</h3><p class="note">${c.protocols} = ${c.recorded_token} token + ${c.tokenless} no token; ranked ${c.ranked} = ${c.watchlist_ranked} watchlist + ${c.below_floor_ranked} early; token trades ${c.tokenized}; token no usable cap ${c.token_no_cap}; set aside ${c.set_aside}. Drop/$1k assumes ${Math.round(MODEL.drop_share * 100)}% of expected value to a $${commas(MODEL.deposit_usd)} depositor; gas at ${esc(PLAN.gas_note)}; age null → ${MODEL.age_assumed_days}d. One sealed day: LOO and walk-forward are the only tests it supports.</p></div>
   </div></div></div>`;
 }
 
