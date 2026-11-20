@@ -1,87 +1,96 @@
-// Token Radar page: computes the radar from the sealed snapshot (data.js) with model.js,
-// the same module main.ts uses for board.json, then renders the board, detail, and model views.
-import { buildRadar, MODEL, PLAN } from './model.js';
+// Token Radar page: renders the radar that main.ts wrote to ../data.js with the
+// same dashboard/model.js the program imported. Every figure below is a field of
+// that JSON; no number is typed into this file by hand.
+import { MODEL, PLAN } from './model.js';
 
+const R = window.RADAR;
 const $ = (s, el = document) => el.querySelector(s);
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
-const usd = (n) => n >= 1e9 ? `$${(n / 1e9).toFixed(2)}B` : n >= 1e6 ? `$${(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `$${(n / 1e3).toFixed(0)}K` : `$${n}`;
-const full = (n) => `$${n.toLocaleString('en-US')}`;
-const pct = (n) => n === null ? '<span class="mut">n/a</span>' : `<span class="${n > 0 ? 'up' : n < 0 ? 'down' : 'mut'}">${n > 0 ? '+' : ''}${n.toFixed(1)}%</span>`;
-const days = (d) => d === null ? '<span class="mut">unknown</span>' : d >= 365 ? `${(d / 365).toFixed(1)}y` : `${d}d`;
+const commas = (n) => Math.round(n).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+const full = (n) => `$${commas(n)}`;
+const usd = (n) => n >= 1e9 ? `$${(n / 1e9).toFixed(2)}B` : n >= 1e6 ? `$${(n / 1e6).toFixed(n >= 1e8 ? 0 : 1)}M` : n >= 1e3 ? `$${(n / 1e3).toFixed(0)}K` : `$${Math.round(n)}`;
+const pct = (v) => v === null ? '<span class="mut">n/a</span>' : `<span class="${v > 0 ? 'up' : v < 0 ? 'down' : 'mut'}">${v > 0 ? '+' : ''}${v.toFixed(1)}%</span>`;
 const x = (m) => `${m.toFixed(3)}×`;
+const x2 = (m) => `×${m.toFixed(2)}`;
+const age = (r) => `${r.age_days}d${r.age_assumed ? '<span class="badge assume">assumed</span>' : ''}`;
+const cmpStr = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+const one = (n) => `$${n.toFixed(2)}`;
 
-const snap = window.SNAPSHOT;
 const view = $('#view');
-if (!snap) {
-  view.innerHTML = '<p class="empty">No snapshot loaded: run <code>node main.ts</code> to write data.js beside this folder.</p>';
+if (!R) {
+  view.innerHTML = '<p class="empty">No radar loaded: run <b>node main.ts</b> to write data.js beside this dashboard.</p>';
   throw new Error('data.js missing');
 }
-const R = buildRadar(snap);
-const maxLog = Math.log10(R.rows[0].implied_value_usd);
-const minLog = Math.log10(R.rows[R.rows.length - 1].implied_value_usd);
 
-$('#meta').innerHTML = `Snapshot ${esc(R.as_of)} · ${esc(R.source)}<br>Model ${MODEL.version} · same code writes board.json`;
-const below = R.rows.filter((r) => !r.watchlist).length;
-$('#stats').innerHTML = [
-  [R.rows.length, 'ranked, no token recorded'],
-  [`${R.rows.filter((r) => r.watchlist).length}/${R.watch_n}`, `watchlist ≥ ${usd(R.floor_usd)} covered`],
-  [below, 'early, below the floor'],
-  [R.live.length, 'live tokens, the comparables'],
-  [R.aside.length, 'products, set aside'],
-  [x(R.global_multiple), 'median mcap ÷ TVL'],
-].map(([b, s]) => `<div class="stat"><b>${b}</b><span>${s}</span></div>`).join('');
+$('#stamp').innerHTML = `<b>SNAPSHOT</b> ${esc(R.as_of)} &middot; ${R.counts.protocols} protocols<br><b>SOURCE</b> DefiLlama &middot; <b>MODEL</b> ${esc(R.model)}`;
+$('#kpis').innerHTML = [
+  [R.counts.ranked, 'pre-token protocols ranked'],
+  [`${R.counts.watchlist_ranked}/${R.counts.watchlist}`, 'watchlist covered'],
+  [R.counts.tokenized, 'tokenized comparables fitted'],
+  [x(R.global.median), 'global mcap/TVL median'],
+  [x2(R.validation.median_miss_factor), 'leave-one-out median miss'],
+  [R.counts.set_aside, 'set aside, each with a reason'],
+].map(([b, s]) => `<div class="kpi"><b>${b}</b><span>${s}</span></div>`).join('');
+$('#methodbar').innerHTML = `<div class="f">value = TVL <i>×</i> category median mcap/TVL <i>×</i> growth <i>×</i> maturity</div><span>fitted on ${R.counts.tokenized} tokenized protocols &middot; 7d ×${MODEL.growth_weight} within ±${-MODEL.growth_lo}/${MODEL.growth_hi}% &middot; maturity ${MODEL.maturity_base}→1.00 over ${MODEL.maturity_days / 365}y</span><button class="go" id="goMethod">Method &amp; validation →</button>`;
 
-// ---- board -------------------------------------------------------------
-const state = { q: '', scope: 'all', cat: '', chain: '', growing: false, key: 'rank', dir: 1 };
-const cats = [...new Set(R.rows.map((r) => r.category ?? '(none)'))].sort();
-const chains = [...new Set(R.rows.flatMap((r) => r.chains))].sort();
+// ---------------------------------------------------------------- board
+
+const state = { q: '', cat: '', chain: '', minTvl: 0, watch: false, grow: false, key: 'rank', dir: 1 };
+const cats = [...new Set(R.rows.map((r) => r.category ?? '(none)'))].sort(cmpStr);
+const chainCount = new Map();
+for (const r of R.rows) for (const c of r.chains) chainCount.set(c, (chainCount.get(c) ?? 0) + 1);
+const chains = [...chainCount.keys()].sort((a, b) => chainCount.get(b) - chainCount.get(a) || cmpStr(a, b));
+const maxTvl = Math.max(...R.rows.map((r) => r.tvl_usd));
 const COLS = [
-  ['rank', '#', ''], ['name', 'Protocol', ''], ['chains', 'Chains', ''], ['tvl_usd', 'TVL', 'num'], ['change_7d', '7d TVL', 'num'],
-  ['age_days', 'Tokenless run', 'num'], ['multiple', 'Multiple', 'num'], ['implied_value_usd', 'Implied launch value', 'num'],
-  ['per_1k_usd', 'Per $1k*', 'num'], ['hold', 'Plan', 'num'],
+  ['rank', '#', 'num'], ['name', 'Protocol', ''], ['tvl_usd', 'TVL', 'num'],
+  ['change_7d', '7d TVL', 'num'], ['age_days', 'No-token age', 'num'], ['multiple', 'Multiple', 'num'],
+  ['implied_value_usd', 'Implied value · P25–P75', 'num'], ['net_per_hour_usd', 'Net $/h*', 'num'],
+  ['hold_days', 'Plan', 'num'],
 ];
-const get = (r, k) => k === 'hold' ? r.plan.hold_days : k === 'chains' ? r.chains.length : r[k];
-
-function filtered() {
+const get = (r, k) => r[k];
+const filtered = () => {
   const q = state.q.toLowerCase();
   const rows = R.rows.filter((r) =>
-    (state.scope === 'all' || (state.scope === 'watch') === r.watchlist) &&
     (!state.cat || (r.category ?? '(none)') === state.cat) &&
     (!state.chain || r.chains.includes(state.chain)) &&
-    (!state.growing || (r.change_7d ?? 0) > 0) &&
+    r.tvl_usd >= state.minTvl &&
+    (!state.watch || r.watchlist) &&
+    (!state.grow || (r.change_7d ?? 0) > 0) &&
     (!q || r.name.toLowerCase().includes(q) || r.slug.includes(q)));
   const { key, dir } = state;
   return rows.sort((a, b) => {
-    const va = get(a, key), vb = get(b, key);
+    const va = get(a, key);
+    const vb = get(b, key);
     if (va === vb) return a.rank - b.rank;
     if (va === null) return 1;
     if (vb === null) return -1;
-    return (typeof va === 'string' ? va.localeCompare(vb) : va - vb) * dir;
+    return (typeof va === 'string' ? cmpStr(va, vb) : va - vb) * dir;
   });
-}
+};
 
 function renderBoard() {
   view.innerHTML = `
   <div class="controls">
     <input type="search" id="q" placeholder="Search protocol" value="${esc(state.q)}" aria-label="Search protocol">
-    <div class="seg" role="group" aria-label="Scope">${[['all', 'All'], ['watch', 'Watchlist'], ['early', 'Below floor']]
-      .map(([k, l]) => `<button data-scope="${k}" aria-pressed="${state.scope === k}">${l}</button>`).join('')}</div>
-    <select id="cat" aria-label="Category"><option value="">All categories</option>${cats.map((c) => `<option${c === state.cat ? ' selected' : ''}>${esc(c)}</option>`).join('')}</select>
-    <select id="chain" aria-label="Chain"><option value="">All chains</option>${chains.map((c) => `<option${c === state.chain ? ' selected' : ''}>${esc(c)}</option>`).join('')}</select>
-    <label class="check"><input type="checkbox" id="grow"${state.growing ? ' checked' : ''}> TVL growing (7d &gt; 0)</label>
+    <select id="cat" aria-label="Category"><option value="">All categories</option>${cats.map((c) => `<option value="${esc(c)}"${c === state.cat ? ' selected' : ''}>${esc(c)} (${R.rows.filter((r) => (r.category ?? '(none)') === c).length})</option>`).join('')}</select>
+    <select id="chain" aria-label="Chain"><option value="">All chains</option>${chains.map((c) => `<option value="${esc(c)}"${c === state.chain ? ' selected' : ''}>${esc(c)} (${chainCount.get(c)})</option>`).join('')}</select>
+    <label class="slider">min TVL <input type="range" id="minTvl" min="0" max="${Math.ceil(maxTvl / 1e7) * 10}" step="5" value="${state.minTvl / 1e6}" aria-label="Minimum TVL in millions"><output id="minOut">${usd(state.minTvl)}</output></label>
+    <label class="check"><input type="checkbox" id="watch"${state.watch ? ' checked' : ''}> watchlist only</label>
+    <label class="check"><input type="checkbox" id="grow"${state.grow ? ' checked' : ''}> 7d growing</label>
     <span class="count" id="count"></span>
   </div>
   <div class="wrap"><table><thead><tr>${COLS.map(([k, l, c]) => `<th data-k="${k}" class="${c}" aria-sort="none">${l}</th>`).join('')}</tr></thead><tbody id="rows"></tbody></table></div>
-  <p class="note">* Per $1k: what a $1,000 deposit would receive if ${MODEL.drop_share * 100}% of the implied value went to depositors pro rata by TVL. A hypothetical for comparing plans, not an expected payout. Click a column to sort, a row for its reasoning and farm plan.</p>`;
+  <p class="note">* Net $/h = (implied value × $1,000 ÷ TVL − plan gas) ÷ hours held: a comparison across plans, not a payout. <b>c</b> marks a category-median multiple, <b>g</b> the global median. <b>assumed</b> means listed_at is null and the model uses ${MODEL.age_assumed_days} days. Click a row for its inputs, interval and farm plan.</p>`;
   $('#q').addEventListener('input', (e) => { state.q = e.target.value; fill(); });
-  view.querySelectorAll('[data-scope]').forEach((b) => b.addEventListener('click', () => {
-    state.scope = b.dataset.scope;
-    view.querySelectorAll('[data-scope]').forEach((o) => o.setAttribute('aria-pressed', String(o === b)));
-    fill();
-  }));
   $('#cat').addEventListener('change', (e) => { state.cat = e.target.value; fill(); });
   $('#chain').addEventListener('change', (e) => { state.chain = e.target.value; fill(); });
-  $('#grow').addEventListener('change', (e) => { state.growing = e.target.checked; fill(); });
+  $('#minTvl').addEventListener('input', (e) => {
+    state.minTvl = Number(e.target.value) * 1e6;
+    $('#minOut').textContent = usd(state.minTvl);
+    fill();
+  });
+  $('#watch').addEventListener('change', (e) => { state.watch = e.target.checked; fill(); });
+  $('#grow').addEventListener('change', (e) => { state.grow = e.target.checked; fill(); });
   view.querySelectorAll('th[data-k]').forEach((th) => th.addEventListener('click', () => {
     const k = th.dataset.k;
     state.dir = state.key === k ? -state.dir : (k === 'rank' || k === 'name' ? 1 : -1);
@@ -93,7 +102,14 @@ function renderBoard() {
 
 function fill() {
   const rows = filtered();
-  $('#count').textContent = `${rows.length} of ${R.rows.length} protocols`;
+  const bits = [];
+  if (state.cat) bits.push(state.cat);
+  if (state.chain) bits.push(state.chain);
+  if (state.minTvl > 0) bits.push(`TVL ≥ ${usd(state.minTvl)}`);
+  if (state.watch) bits.push('watchlist only');
+  if (state.grow) bits.push('7d growing');
+  if (state.q) bits.push(`“${state.q}”`);
+  $('#count').innerHTML = `<b>${rows.length}</b> of ${R.rows.length} rows${bits.length ? ` &middot; <span class="flt">${esc(bits.join(' · '))}</span>` : ''}`;
   view.querySelectorAll('th[data-k]').forEach((th) => {
     const on = th.dataset.k === state.key;
     th.classList.toggle('sorted', on);
@@ -101,107 +117,175 @@ function fill() {
     th.textContent = COLS.find((c) => c[0] === th.dataset.k)[1] + (on ? (state.dir > 0 ? ' ▲' : ' ▼') : '');
   });
   $('#rows').innerHTML = rows.length ? rows.map((r) => {
-    const w = maxLog === minLog ? 100 : 6 + 94 * (Math.log10(r.implied_value_usd) - minLog) / (maxLog - minLog);
+    const badge = `${r.watchlist ? '<span class="badge wl">WATCHLIST</span>' : '<span class="badge early">BELOW FLOOR</span>'}${r.missing.length ? `<span class="badge assume">${r.missing.length} missing</span>` : ''}`;
     return `<tr tabindex="0" data-slug="${esc(r.slug)}">
-      <td class="rank">${r.rank}</td>
-      <td><span class="name">${esc(r.name)}</span>${r.watchlist ? '<span class="wl">WATCHLIST</span>' : ''}${r.missing.length ? `<span class="miss" title="${esc(r.missing.join('; '))}">◆ ${r.missing.length} field${r.missing.length > 1 ? 's' : ''} missing</span>` : ''}<div class="sub">${esc(r.category ?? 'no category recorded')}</div></td>
-      <td class="sub">${esc(r.chains[0] ?? 'none recorded')}${r.chains.length > 1 ? ` +${r.chains.length - 1}` : ''}</td>
+      <td class="rank${r.rank <= 3 ? ' top' : ''}">${r.rank}</td>
+      <td><span class="name">${esc(r.name)}</span>${badge}<div class="sub">${esc(r.category ?? 'no category recorded')} · ${esc(r.chains[0] ?? 'no chain')}${r.chains.length > 1 ? ` +${r.chains.length - 1}` : ''}</div></td>
       <td class="num">${usd(r.tvl_usd)}</td>
-      <td class="num">${pct(r.change_7d)}</td>
-      <td class="num">${days(r.age_days)}</td>
-      <td class="num">${x(r.multiple)}</td>
-      <td class="num val-cell"><div class="val">${usd(r.implied_value_usd)}<span class="bar"><i style="width:${w.toFixed(1)}%"></i></span></div></td>
-      <td class="num">${usd(r.per_1k_usd)}</td>
-      <td class="num sub">${r.plan.hold_days}d · ${r.plan.steps.length} steps</td></tr>`;
-  }).join('') : '<tr><td colspan="10" class="empty">No protocol matches these filters.</td></tr>';
+      <td class="num delta">${pct(r.change_7d)}</td>
+      <td class="num">${age(r)}</td>
+      <td class="num">${x(r.multiple)}<span class="src">${r.multiple_source === 'category' ? 'c' : 'g'}</span></td>
+      <td class="num"><div class="val">${usd(r.implied_value_usd)}</div><div class="ivl">${usd(r.low_usd)}–${usd(r.high_usd)}</div></td>
+      <td class="num up">${one(r.net_per_hour_usd)}</td>
+      <td class="num plan">${r.hold_days}d · ${r.plan.length} steps</td>
+    </tr>`;
+  }).join('') : '<tr><td colspan="9" class="empty">No protocol matches these filters.</td></tr>';
 }
 
 view.addEventListener('click', (e) => { const tr = e.target.closest('tr[data-slug]'); if (tr) openDetail(tr.dataset.slug); });
 view.addEventListener('keydown', (e) => { const tr = e.target.closest('tr[data-slug]'); if (tr && e.key === 'Enter') openDetail(tr.dataset.slug); });
 
-// ---- detail ------------------------------------------------------------
-const detail = $('#detail'), scrim = $('#scrim');
+// ---------------------------------------------------------------- detail
+
+const detail = $('#detail');
+const scrim = $('#scrim');
 let lastFocus = null;
+
+function bandMarkup(r) {
+  const lo = Math.log10(r.low_usd);
+  const hi = Math.log10(r.high_usd);
+  const at = hi === lo ? 50 : ((Math.log10(r.implied_value_usd) - lo) / (hi - lo)) * 100;
+  return `<div class="band"><i style="left:3%;right:3%"></i><b style="left:${at.toFixed(1)}%"></b></div>`;
+}
+
 function openDetail(slug) {
   const r = R.rows.find((o) => o.slug === slug);
+  if (!r) return;
   lastFocus = document.activeElement;
-  const g = r.change_7d === null ? 'not reported → 1.000' : `${r.change_7d.toFixed(2)}%${r.change_7d !== r.growth_counted ? ` (counted ${r.growth_counted}%)` : ''} × ${MODEL.growth_weight} → ${r.growth.toFixed(3)}`;
-  const age = r.age_days === null ? 'listed_at not reported → 0 d' : `${r.age_days} d since ${r.listed_at}`;
-  const pos = R.rows.indexOf(r);
-  const above = pos > 0 ? R.rows[pos - 1] : null;
+  const clamped = r.change_7d !== null && r.change_7d !== r.growth_counted;
+  const src = r.multiple_source === 'category'
+    ? `median mcap/TVL of ${r.multiple_n} tokenized ${esc(r.category)} protocols`
+    : `global median mcap/TVL of ${r.multiple_n} tokenized protocols, because this category has fewer than ${MODEL.min_peers} tokenized peers`;
+  const peers = r.peers.length
+    ? `<table class="mini"><tr><th>Tokenized peer</th><th class="num">Mcap</th><th class="num">TVL</th><th class="num">Mcap/TVL</th></tr>${r.peers.map((p) => `<tr><td>${esc(p.name)} <span class="mut">${esc(p.symbol ?? '')}</span></td><td class="num">${usd(p.mcap_usd)}</td><td class="num">${usd(p.tvl_usd)}</td><td class="num">${x(p.ratio)}</td></tr>`).join('')}</table>`
+    : `<p class="note">No tokenized protocol in this exact category, so the model uses the global median over all ${R.counts.tokenized}.</p>`;
   detail.innerHTML = `
-  <div class="d-head"><div>
-    <div class="sub">Rank ${r.rank} of ${R.rows.length}${r.watchlist ? ' · on the watchlist' : ' · below the floor, not on the watchlist'}</div>
-    <h2 id="d-title">${esc(r.name)}</h2>
-    <div class="sub">${esc(r.category ?? 'no category recorded')} · ${r.chains.length ? esc(r.chains.join(', ')) : 'no chain recorded'}</div>
-  </div><button class="close" id="close">Close ✕</button></div>
-  <div class="d-grid">
+  <div class="dtop">
+    <div class="who">
+      <div class="drank">Rank ${r.rank} of ${R.rows.length} · ${r.watchlist ? 'on the watchlist' : 'below the floor, not on the watchlist'}</div>
+      <h2 class="dtitle" id="d-title">${esc(r.name)}</h2>
+      <div class="dsub">${esc(r.category ?? 'no category recorded')} · ${esc(r.chains.slice(0, 5).join(', '))}${r.chains.length > 5 ? ` +${r.chains.length - 5}` : ''} · records no token in DefiLlama (no gecko id, symbol or market cap)</div>
+    </div>
+    <button class="dclose" id="dclose">Close ✕</button>
+  </div>
+  <div class="dhero">
+    <div class="dvalue">
+      <div class="big">${full(r.implied_value_usd)}</div>
+      <div class="eq">${full(r.tvl_usd)} TVL × ${x(r.multiple)} × ${r.growth_mult.toFixed(3)} growth × ${r.maturity.toFixed(3)} maturity</div>
+      <div class="note">Base ${full(r.base_usd)} × growth ${r.growth_mult.toFixed(3)} × maturity ${r.maturity.toFixed(3)}. The interval below is the same equation at the category's p25 and p75 multiples.</div>
+    </div>
+    <div class="dband">
+      <div class="lab">P25–P75 interval · where the same model puts this launch</div>
+      <div class="nums"><span>P25 <b>${usd(r.low_usd)}</b></span><span>point <b>${usd(r.implied_value_usd)}</b></span><span>P75 <b>${usd(r.high_usd)}</b></span></div>
+      ${bandMarkup(r)}
+      <div class="nums" style="margin-top:6px"><span class="mut">${x(r.multiple_lo)}</span><span class="mut">${x(r.multiple)}</span><span class="mut">${x(r.multiple_hi)}</span></div>
+    </div>
+  </div>
+  <div class="dcols">
     <div>
-      <div class="card"><h3>Implied launch value</h3>
-        <div class="hero">${full(r.implied_value_usd)}</div>
-        <div class="eq">${usd(r.tvl_usd)} TVL × ${x(r.multiple)} multiple × ${r.growth.toFixed(3)} growth × ${r.run.toFixed(3)} run</div>
-        <p class="note">${above ? `Ranks below ${esc(above.name)} (${usd(above.implied_value_usd)}).` : 'The board’s most valuable protocol.'} Records no token: no CoinGecko id, symbol or market cap in DefiLlama’s record.</p>
-      </div>
-      <div class="card" style="margin-top:12px"><h3>The numbers behind the rank</h3>
-        <div class="kv">
-          <span>TVL</span><em>tvl_usd</em><span class="num">${full(r.tvl_usd)}</span>
-          <span>Category multiple</span><em>${r.cat_n ? `${r.cat_n} live peer${r.cat_n > 1 ? 's' : ''}, median ${x(r.cat_median)}` : 'no live peer'}, shrunk to ${x(R.global_multiple)}</em><span class="num">${x(r.multiple)}</span>
-          <span>Growth factor</span><em>${g}</em><span class="num">${r.growth.toFixed(3)}</span>
-          <span>Tokenless run</span><em>${age}</em><span class="num">${r.run.toFixed(3)}</span>
-          <span>Per $1k*</span><em>${MODEL.drop_share * 100}% of value ÷ TVL × $1,000</em><span class="num">${full(r.per_1k_usd)}</span>
+      <div class="card"><h3>Model inputs from the snapshot</h3>
+        <div class="rows">
+          <div class="row"><div class="l"><span class="k">TVL</span><span class="e">tvl_usd</span></div><span class="v">${full(r.tvl_usd)}</span></div>
+          <div class="row"><div class="l"><span class="k">7d TVL change</span><span class="e">${r.change_7d === null ? 'change_7d not reported' : `change_7d ${r.change_7d.toFixed(2)}%${clamped ? `, counted ${r.growth_counted}%` : ''}`}</span></div><span class="v">${pct(r.change_7d)} → ×${r.growth_mult.toFixed(3)}</span></div>
+          <div class="row"><div class="l"><span class="k">No-token age</span><span class="e">${esc(r.age_basis)}</span></div><span class="v">${r.age_days}d</span></div>
+          <div class="row"><div class="l"><span class="k">Maturity</span><span class="e">${MODEL.maturity_base} + min(age, ${MODEL.maturity_days})/${MODEL.maturity_days} × ${MODEL.maturity_span}</span></div><span class="v">${r.maturity.toFixed(3)}</span></div>
+          <div class="row"><div class="l"><span class="k">Multiple</span><span class="e">${src}</span></div><span class="v acc">${x(r.multiple)}</span></div>
+          <div class="row"><div class="l"><span class="k">Base</span><span class="e">TVL × multiple</span></div><span class="v">${full(r.base_usd)}</span></div>
+          <div class="row"><div class="l"><span class="k">Growth factor</span><span class="e">1 + clamp(change, ${MODEL.growth_lo}, ${MODEL.growth_hi})/100 × ${MODEL.growth_weight}</span></div><span class="v">×${r.growth_mult.toFixed(3)}</span></div>
+          <div class="row"><div class="l"><span class="k">Maturity factor</span><span class="e">${MODEL.maturity_base} → 1.00 over ${MODEL.maturity_days} days</span></div><span class="v">×${r.maturity.toFixed(3)}</span></div>
+          <div class="row"><div class="l"><span class="k">Implied value</span><span class="e">max(1, round(base × growth × maturity))</span></div><span class="v acc">${full(r.implied_value_usd)}</span></div>
+          <div class="row"><div class="l"><span class="k">Per $1k TVL</span><span class="e">implied × $1,000 ÷ TVL, before gas</span></div><span class="v">${full(r.per_1k_usd)}</span></div>
+          <div class="row"><div class="l"><span class="k">Net $/h</span><span class="e">(${full(r.per_1k_usd)} − ${one(r.gas_total_usd)} gas) ÷ ${r.hold_days}d hold</span></div><span class="v">${one(r.net_per_hour_usd)}</span></div>
         </div>
       </div>
-      <div class="card" style="margin-top:12px"><h3>Live-token peers in ${esc(r.category ?? 'this category')}</h3>
-        ${r.peers.length ? `<table class="mini"><tr><th>Token</th><th class="num">Mcap</th><th class="num">TVL</th><th class="num">Mcap/TVL</th></tr>${r.peers.map((p) => `<tr><td>${esc(p.name)} <span class="mut">${esc(p.symbol ?? '')}</span></td><td class="num">${usd(p.mcap_usd)}</td><td class="num">${usd(p.tvl_usd)}</td><td class="num">${x(p.ratio)}</td></tr>`).join('')}</table>`
-          : `<p class="note">No protocol in this category trades a token in the snapshot, so the all-token median ${x(R.global_multiple)} is used.</p>`}
-      </div>
-      ${r.missing.length ? `<div class="card warn" style="margin-top:12px"><h3>Missing from the snapshot</h3><ul>${r.missing.map((m) => `<li>${esc(m)}</li>`).join('')}</ul></div>` : ''}
+      <div class="card"><h3>Why this multiple</h3>${peers}</div>
+      ${r.missing.length ? `<div class="card warn"><h3>Assumptions for missing fields</h3><ul>${r.missing.map((m) => `<li>${esc(m)}</li>`).join('')}</ul></div>` : ''}
     </div>
-    <div class="card"><h3>Farm plan · ${r.plan.steps.length} steps · ${r.plan.hold_days}-day hold</h3>
-      <ol class="steps">${r.plan.steps.map((s) => `<li>${esc(s.do)}.<div class="chips"><span class="chip c">${esc(s.cost)}</span><span class="chip">${esc(s.time)}</span></div></li>`).join('')}</ol>
-      <p class="note">Total gas ≈ $${r.plan.gas_total_usd.toFixed(2)} on ${esc(r.plan.chain)} for a $${PLAN.position_usd.toLocaleString('en-US')} position. Gas per transaction ($${PLAN.gas_usd.Ethereum} Ethereum, $${PLAN.gas_usd.Bitcoin} Bitcoin, $${PLAN.gas_usd.other.toFixed(2)} elsewhere) and the position size are plan assumptions, not snapshot figures. The hold is longer for younger protocols: 90 d under six months listed, 60 d under a year or unknown, 45 d after.</p>
+    <div>
+      <div class="card"><h3>Farm plan · ${r.plan.length} steps · ${r.hold_days}-day hold · ${r.cooldown_days}-day cooldown</h3>
+        <ol class="steps">${r.plan.map((s) => `<li>${esc(s.do)}<div class="chips"><span class="chip c">${esc(s.cost)}</span><span class="chip">${esc(s.time)}</span></div></li>`).join('')}</ol>
+        <p class="note"><b>Assumptions, not snapshot data:</b> a ${full(PLAN.position_usd)} position, gas at ${esc(PLAN.gas_note)}, and the category minimum in step 3. Estimated gas for the whole plan is ${one(r.gas_total_usd)} on ${esc(r.chains[0] ?? 'the first chain')}. The ${r.hold_days}-day hold is longer for younger protocols; the exit names its own cooldown.</p>
+      </div>
     </div>
   </div>`;
   detail.hidden = scrim.hidden = false;
-  $('#close').addEventListener('click', closeDetail);
-  $('#close').focus();
+  $('#dclose').addEventListener('click', closeDetail);
+  $('#dclose').focus();
 }
 function closeDetail() { detail.hidden = scrim.hidden = true; if (lastFocus) lastFocus.focus(); }
 scrim.addEventListener('click', closeDetail);
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !detail.hidden) closeDetail(); });
 
-// ---- other tabs ---------------------------------------------------------
+// ---------------------------------------------------------------- other views
+
 function renderLive() {
-  view.innerHTML = `<div class="controls"><span class="mut">These ${R.live.length} protocols already trade a token, so they are not ranked. Their market cap ÷ TVL is what sets every category multiple on the board.</span></div>
-  <div class="wrap"><table><thead><tr><th>Protocol</th><th>Category</th><th class="num">Market cap</th><th class="num">TVL</th><th class="num">Mcap/TVL</th><th class="num">7d TVL</th></tr></thead><tbody>
-  ${R.live.map((p) => `<tr><td><span class="name">${esc(p.name)}</span> <span class="mut">${esc(p.symbol ?? '')}</span></td><td class="sub">${esc(p.category ?? 'none recorded')}</td><td class="num">${usd(p.mcap_usd)}</td><td class="num">${usd(p.tvl_usd)}</td><td class="num">${x(p.ratio)}</td><td class="num">${pct(p.change_7d)}</td></tr>`).join('')}
+  view.innerHTML = `<div class="controls"><span class="mut">These ${R.live.length} protocols record a token and a positive market cap and TVL. They are the fitting sample, not ranked: their mcap ÷ TVL is what sets every multiple above.</span></div>
+  <div class="wrap"><table><thead><tr><th>Protocol</th><th>Symbol</th><th>Category</th><th class="num">TVL</th><th class="num">Market cap</th><th class="num">Mcap/TVL</th><th class="num">7d TVL</th></tr></thead><tbody>
+  ${R.live.map((p) => `<tr><td class="name">${esc(p.name)}</td><td class="mut">${esc(p.symbol ?? '')}</td><td class="sub">${esc(p.category ?? 'none recorded')}</td><td class="num">${usd(p.tvl_usd)}</td><td class="num">${usd(p.mcap_usd)}</td><td class="num">${x(p.ratio)}</td><td class="num">${pct(p.change_7d)}</td></tr>`).join('')}
   </tbody></table></div>`;
 }
+
 function renderAside() {
-  view.innerHTML = `<div class="controls"><span class="mut">${R.aside.length} protocols record no token but are left off the board as a wrapped, staked, bridged or child product, by the watchlist’s own rule.</span></div>
+  const labels = { 'wrapper-category': 'wrapper category', versioned: 'version marker', 'wrapper-name': 'wrapped/staked name', exchange: 'exchange product', 'parent-product': 'child of a recorded parent' };
+  const byCode = new Map();
+  for (const p of R.aside) byCode.set(p.code, (byCode.get(p.code) ?? 0) + 1);
+  const summary = [...byCode.entries()].sort((a, b) => b[1] - a[1]).map(([c, n]) => `${labels[c] ?? c} ${n}`).join(' · ');
+  view.innerHTML = `<div class="controls"><span class="mut">${R.aside.length} protocols record no token but are set aside: ${esc(summary)}. The rule is a pattern, not a list of names; the Method tab states it.</span></div>
   <div class="wrap"><table><thead><tr><th>Protocol</th><th>Category</th><th class="num">TVL</th><th>Why it is set aside</th></tr></thead><tbody>
   ${R.aside.map((p) => `<tr><td class="name">${esc(p.name)}</td><td class="sub">${esc(p.category ?? 'none recorded')}</td><td class="num">${usd(p.tvl_usd)}</td><td class="sub">${esc(p.why)}</td></tr>`).join('')}
   </tbody></table></div>`;
 }
-function renderModel() {
+
+function renderMethod() {
+  const v = R.validation;
+  const c = R.counts;
+  const catRows = R.categories.map((k) => `<tr><td>${esc(k.name)}</td><td class="num">${k.n}</td><td class="num">${x(k.p25)}</td><td class="num">${x(k.median)}</td><td class="num">${x(k.p75)}</td><td class="num">${k.rows}</td></tr>`).join('');
   view.innerHTML = `<div class="prose">
-  <h2>Implied launch value</h2>
-  <p><code>value = TVL × category multiple × growth × tokenless run</code>, using only the snapshot’s own fields. The same function in <code>model.js</code> writes board.json and draws this page. No protocol name is special-cased.</p>
-  <h2>Category multiple, from the market</h2>
-  <p>For the ${R.live.length} protocols whose token trades, market cap ÷ TVL is a price the market already sets. A category’s multiple is the median of its peers, blended in log space with the median over all of them (${x(R.global_multiple)}), with weight n against ${MODEL.shrink_k}: a category with one peer leans on the overall median, one with fifteen leans on its own. Clamped to ${MODEL.multiple_min}–${MODEL.multiple_max}×.</p>
-  <h2>Growth</h2>
-  <p><code>1 + ${MODEL.growth_weight} × change_7d / 100</code>, with change_7d held within ±${MODEL.growth_clamp}%, so one week moves value by at most ±${MODEL.growth_weight * MODEL.growth_clamp}%. Not reported → 1.</p>
-  <h2>Tokenless run</h2>
-  <p><code>${MODEL.run_floor} + ${(1 - MODEL.run_floor).toFixed(2)} × min(days since listed_at, ${MODEL.run_full_days}) / ${MODEL.run_full_days}</code>. TVL that has stayed without a token for two years is proven demand; a new listing is discounted 25%. listed_at not reported → counted as new.</p>
-  <h2>What is on the board</h2>
-  <p>All ${R.watch_n} watchlist protocols, plus every protocol below the ${usd(R.floor_usd)} floor that records no token and passes the watchlist’s product tests (category, version marker, wrapped/staked wording, exchange name). Above the floor, a tokenless protocol that passes those tests but is off the watchlist can only have been left out for a parent protocol on record, so it is set aside too. The snapshot has no parent field below the floor, so a row there may still be a child product.</p>
-  <h2>Limits</h2>
-  <p>The value is a claim about the record as it stands, not a forecast of whether or when a token launches. Farm-plan gas and position sizes are assumptions and are labelled as such.</p></div>`;
+  <h2>The model, with its constants and where they came from</h2>
+  <div class="formula">
+    <div>multiple_i <span>= median(mcap_usd / tvl_usd of the tokenized protocols in category_i);</span> n ≥ ${MODEL.min_peers}, else the global median</div>
+    <div>base_i <span>=</span> tvl_usd_i × multiple_i</div>
+    <div>growth_i <span>=</span> 1 + clamp(change_7d_i, ${MODEL.growth_lo}, ${MODEL.growth_hi}) / 100 × ${MODEL.growth_weight}</div>
+    <div>maturity_i <span>=</span> ${MODEL.maturity_base} + min(age_days_i, ${MODEL.maturity_days}) / ${MODEL.maturity_days} × ${MODEL.maturity_span}</div>
+    <div>implied_i <span>=</span> max(${MODEL.value_floor_usd}, round(base_i × growth_i × maturity_i))</div>
+    <div>interval_i <span>=</span> the same formula at the category's p25 and p75 multiples</div>
+  </div>
+  <p>Nothing here is a constant typed in by hand. The multiple is refitted from the snapshot's own ${c.tokenized} tokenized protocols every run; a category with fewer than ${MODEL.min_peers} tokenized peers borrows the global median. Growth counts a week of TVL change at ${MODEL.growth_weight}× and clamps it to ${MODEL.growth_lo}/${MODEL.growth_hi}%. Maturity rises from ${MODEL.maturity_base} to 1.00 over ${MODEL.maturity_days} days: TVL that has run three years without a token is treated as proven demand.</p>
+  <div class="mgrid">
+    <div class="card"><h3>Category medians fitted from the tokenized set</h3>
+      <table class="mtab"><tr><th>Category</th><th class="num">n</th><th class="num">P25</th><th class="num">Median</th><th class="num">P75</th><th class="num">Rows</th></tr>
+      ${catRows}<tr class="global"><td>All tokenized (global fallback)</td><td class="num">${R.global.n}</td><td class="num">${x(R.global.p25)}</td><td class="num">${x(R.global.median)}</td><td class="num">${x(R.global.p75)}</td><td class="num">${c.global_multiple_rows}</td></tr></table>
+      <p class="note">A category earns its own row only at n ≥ ${MODEL.min_peers}. ${c.global_multiple_rows} of the ${c.ranked} ranked rows use the global fallback; the table shows how many rows each fitted category serves.</p>
+    </div>
+    <div>
+      <div class="card"><h3>Leave-one-out validation, stated honestly</h3>
+        <div class="statline">
+          <div class="statbox"><b>${x2(v.median_miss_factor)}</b><span>median miss, category model</span></div>
+          <div class="statbox"><b>${x2(v.global_median_miss_factor)}</b><span>median miss, one global multiple</span></div>
+          <div class="statbox"><b>${v.within_2x_pct}%</b><span>within 2× of the traded mcap</span></div>
+          <div class="statbox"><b>${v.interval_coverage_pct}%</b><span>inside the held-out P25–P75 band</span></div>
+          <div class="statbox"><b>${v.spearman}</b><span>Spearman, predicted vs actual</span></div>
+          <div class="statbox"><b>${v.median_abs_pct}%</b><span>median absolute error</span></div>
+        </div>
+        <p class="note"><b>Method:</b> for each of the ${v.sample} tokenized protocols, refit the multiple with that protocol removed, predict its market cap from its TVL, and compare. The median miss is ${x2(v.median_miss_factor)}; a single global multiple misses by ${x2(v.global_median_miss_factor)}. The category split improves the median but not every tail, and ${v.within_2x_pct}% of held-out tokens land within 2×. That is the honest width of a token multiple, and the reason every row carries a P25–P75 interval instead of one number.</p>
+      </div>
+      <div class="card"><h3>What is on the board, and what is not</h3>
+        <p class="note">${c.protocols} protocols in the snapshot. ${c.recorded_token} record a token; ${c.tokenized} of those have a positive market cap and TVL and are the fitting sample. ${c.tokenless} record no token. ${c.ranked} are ranked: all ${c.watchlist_ranked} watchlist protocols plus ${c.below_floor_ranked} below the ${usd(R.floor_usd)} floor. ${c.set_aside} are set aside with a reason; ${c.no_tvl} were excluded for missing or zero TVL.</p>
+        <p class="note"><b>Set-aside rule, not a name list:</b> a tokenless protocol is left off when its category is a bridge, liquid staking, restaking, CEX or stablecoin wrapper; its name ends in a version marker; its name contains wrapped, staked, staking, restaked, stETH, rETH or sETH; or it begins with an exchange name. Above the floor, a tokenless protocol off the watchlist that passes every test is set aside as a child of a recorded parent. A protocol with any of mcap_usd, gecko_id or symbol set is never a candidate.</p>
+      </div>
+    </div>
+  </div>
+  <h2>Known limits</h2>
+  <p>Ages are days since DefiLlama began tracking a protocol, not days since a token launch. When listed_at is null the age is assumed to be ${MODEL.age_assumed_days} days and the row says so. Farm-plan gas, minimums and the ${full(PLAN.position_usd)} position are assumptions for comparison, not quotes. The snapshot is one sealed day: there is no walk-forward window, no Brier score and no out-of-sample period, so this page reports a leave-one-out fit rather than inventing them. Implied value is a claim about the record as it stands, not a forecast that a token launches.</p>
+  </div>`;
 }
 
-const TABS = { board: renderBoard, live: renderLive, aside: renderAside, model: renderModel };
-document.querySelectorAll('[data-tab]').forEach((b) => b.addEventListener('click', () => {
-  document.querySelectorAll('[data-tab]').forEach((o) => o.setAttribute('aria-selected', String(o === b)));
-  TABS[b.dataset.tab]();
-}));
+const TABS = { board: renderBoard, live: renderLive, aside: renderAside, method: renderMethod };
+function selectTab(name) {
+  document.querySelectorAll('[data-tab]').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.tab === name)));
+  TABS[name]();
+}
+document.querySelectorAll('[data-tab]').forEach((b) => b.addEventListener('click', () => selectTab(b.dataset.tab)));
+document.addEventListener('click', (e) => { if (e.target.id === 'goMethod') selectTab('method'); });
 renderBoard();
+window.__RADAR_READY = true;
