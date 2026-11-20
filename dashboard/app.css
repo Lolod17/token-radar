@@ -90,6 +90,10 @@ td.rank.top { color: var(--acc); font-weight: 700; }
 .src { color: var(--faint); font-size: 9px; margin-left: 3px; }
 .delta { font-size: 11.5px; }
 .plan { color: var(--muted); font-size: 10.5px; white-space: nowrap; }
+.vbadge { display: inline-block; padding: 0 4px; border-radius: 3px; font-size: 9px; font-weight: 700; letter-spacing: .04em; border: 1px solid var(--line2); color: var(--muted); }
+.vbadge.farm { color: var(--acc); border-color: var(--acc-dim); }
+.vbadge.marg { color: var(--amber); border-color: var(--amber-dim); }
+.vbadge.skip { color: var(--red); border-color: #5a2a2a; }
 .empty { padding: 34px; color: var(--muted); text-align: center; }
 
 .scrim { position: fixed; inset: 0; z-index: 10; background: rgba(3, 6, 9, .72); }

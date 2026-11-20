@@ -1,8 +1,5 @@
-// Token Radar: one sealed DefiLlama snapshot in, one ranked board out.
-//
-// The model is fitted from the snapshot and run by both sides: main.ts imports this
-// module to write board.json and data.js, the page imports it for its constants and
-// labels and renders the rows data.js carries. No protocol name is special-cased.
+// Token Radar model: the sealed snapshot in, the ranked radar out. main.ts imports
+// this module to write board.json and data.js; the page renders that same object.
 //
 //   multiple_i    = median(mcap/TVL of the tokenized protocols in category_i), n >= 5
 //                   else the median over every tokenized protocol
@@ -10,10 +7,10 @@
 //   growth_i      = 1 + clamp(change_7d_i, -60, 120)/100 x 0.35
 //   maturity_i    = 0.55 + min(age_days_i, 1095)/1095 x 0.45
 //   implied_i     = max(1, round(base_i x growth_i x maturity_i))
-//   low_i, high_i = the same with the category's p25 and p75 multiples
+//   low_i, high_i = the same with the fitted multiple's p25 and p75
 //
-// "Tokenized" means a positive market cap and a positive TVL: the market already
-// prices those tokens, so their mcap/TVL is the multiple a launch would inherit.
+// "Tokenized" means a positive market cap and TVL: the market already prices those
+// tokens, so their mcap/TVL is the multiple a launch would inherit.
 
 export const MODEL = {
   version: 'radar-fitted-1',
@@ -344,11 +341,8 @@ function spearman(xs, ys) {
   return dx === 0 || dy === 0 ? 0 : num / Math.sqrt(dx * dy);
 }
 
-/**
- * Leave-one-out validation over the tokenized protocols: refit the multiple without
- * the protocol, predict its market cap from its TVL, and measure the miss. The same
- * test with a single global multiple shows what the category split buys.
- */
+/** Leave-one-out over the tokenized protocols: refit without each one, predict its
+ * market cap from its TVL, and compare. A global-only test shows what the split buys. */
 export function validate(protocols, fits) {
   const live = fits.live;
   const byCategory = new Map();

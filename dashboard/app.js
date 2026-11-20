@@ -15,6 +15,7 @@ const x2 = (m) => `×${m.toFixed(2)}`;
 const age = (r) => `${r.age_days}d${r.age_assumed ? '<span class="badge assume">assumed</span>' : ''}`;
 const cmpStr = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 const one = (n) => `$${n.toFixed(2)}`;
+const verdict = (r) => r.net_per_hour_usd >= 0.10 ? ['FARM', 'farm'] : r.net_per_hour_usd >= 0.04 ? ['MARGINAL', 'marg'] : ['SKIP', 'skip'];
 
 const view = $('#view');
 if (!R) {
@@ -26,7 +27,7 @@ $('#stamp').innerHTML = `<b>SNAPSHOT</b> ${esc(R.as_of)} &middot; ${R.counts.pro
 const topCats = [...R.categories].sort((a, b) => b.rows - a.rows || cmpStr(a.name, b.name)).slice(0, 4);
 $('#kpis').innerHTML = [
   [R.counts.ranked, 'pre-token protocols ranked'],
-  [`${R.counts.watchlist_ranked}/${R.counts.watchlist}`, 'watchlist covered'],
+  [`${R.counts.watchlist_ranked}/${R.counts.watchlist}`, `watchlist · ${R.counts.below_floor_ranked} below floor`],
   [R.counts.tokenized, 'tokenized comparables fitted'],
   [x(R.global.median), 'global mcap/TVL median'],
   [x2(R.validation.median_miss_factor), 'leave-one-out median miss'],
@@ -81,7 +82,7 @@ function renderBoard() {
     <span class="count" id="count"></span>
   </div>
   <div class="wrap"><table><thead><tr>${COLS.map(([k, l, c]) => `<th data-k="${k}" class="${c}" aria-sort="none">${l}</th>`).join('')}</tr></thead><tbody id="rows"></tbody></table></div>
-  <p class="note">* Net $/h = (implied value × $1,000 ÷ TVL − plan gas) ÷ hours held: a comparison across plans, not a payout. <b>c</b> marks a category-median multiple, <b>g</b> the global median. <b>assumed</b> means listed_at is null and the model uses ${MODEL.age_assumed_days} days. Click a row for its inputs, interval and farm plan.</p>`;
+  <p class="note">* Net $/h = (implied value × $1,000 ÷ TVL − plan gas) ÷ hours held; the smaller figure is that net $1,000 before the hold. Verdict: FARM at ≥ $0.10/h, MARGINAL at ≥ $0.04/h, SKIP below — a comparison across plans, not a payout. <b>c</b> marks a category-median multiple, <b>g</b> the global median. <b>assumed</b> means listed_at is null and the model uses ${MODEL.age_assumed_days} days. Click a row for its inputs, interval and farm plan.</p>`;
   $('#q').addEventListener('input', (e) => { state.q = e.target.value; fill(); });
   $('#cat').addEventListener('change', (e) => { state.cat = e.target.value; fill(); });
   $('#chain').addEventListener('change', (e) => { state.chain = e.target.value; fill(); });
@@ -119,6 +120,7 @@ function fill() {
   });
   $('#rows').innerHTML = rows.length ? rows.map((r) => {
     const badge = `${r.watchlist ? '<span class="badge wl">WATCHLIST</span>' : '<span class="badge early">BELOW FLOOR</span>'}${r.missing.length ? `<span class="badge assume">${r.missing.length} missing</span>` : ''}`;
+    const [vl, vc] = verdict(r);
     return `<tr tabindex="0" data-slug="${esc(r.slug)}">
       <td class="rank${r.rank <= 3 ? ' top' : ''}">${r.rank}</td>
       <td><span class="name">${esc(r.name)}</span>${badge}<div class="sub">${esc(r.category ?? 'no category recorded')} · ${esc(r.chains[0] ?? 'no chain')}${r.chains.length > 1 ? ` +${r.chains.length - 1}` : ''}</div></td>
@@ -127,8 +129,8 @@ function fill() {
       <td class="num">${age(r)}</td>
       <td class="num">${x(r.multiple)}<span class="src">${r.multiple_source === 'category' ? 'c' : 'g'}</span></td>
       <td class="num"><div class="val">${usd(r.implied_value_usd)}</div><div class="ivl">${usd(r.low_usd)}–${usd(r.high_usd)}</div></td>
-      <td class="num up">${one(r.net_per_hour_usd)}</td>
-      <td class="num plan">${r.hold_days}d · ${r.plan.length} steps</td>
+      <td class="num up">${one(r.net_per_hour_usd)}<span class="src">/h</span><div class="ivl">${full(r.net_1k_usd)} net</div></td>
+      <td class="num plan"><span class="vbadge ${vc}">${vl}</span> ${r.hold_days}d · ${r.plan.length} steps</td>
     </tr>`;
   }).join('') : '<tr><td colspan="9" class="empty">No protocol matches these filters.</td></tr>';
 }
