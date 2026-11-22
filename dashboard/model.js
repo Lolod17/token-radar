@@ -1,6 +1,6 @@
 // Constants shared by main.ts's fitted model and the page's own recomputation.
 export const MODEL = {
-  version: 'radar-curve-3',
+  version: 'radar-curve-4',
   growth_weight: 0.35,
   growth_lo: -60,
   growth_hi: 120,

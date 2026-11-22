@@ -64,7 +64,7 @@ $('#kpis').innerHTML = [
   [`${v.band.coverage}%`, 'range covers (stated 50%)'],
   [R.counts.set_aside, 'set aside by rule'],
 ].map(([b, s]) => `<div class="kpi"><b>${b}</b><span>${s}</span></div>`).join('');
-$('#methodbar').innerHTML = `<div class="mtext"><div class="f">expected = 10<sup>a + b·logTVL + δ<sub>cat</sub></sup> <i>×</i> growth <i>×</i> maturity <i>×</i> token odds</div><div class="f2">curve a=${v.curve.a.toFixed(3)} b=${v.curve.b.toFixed(3)} + EB cat (k=${MODEL.cat_shrink_k}) · odds β=[${R.odds.beta.map((z) => z.toFixed(2)).join(', ')}] · fit ${R.counts.tokenized} priced + ${R.counts.protocols} odds</div></div><button class="go" id="goMethod">Method &amp; validation →</button>`;
+$('#methodbar').innerHTML = `<div class="mtext"><div class="f">expected = 10<sup>a + b·logTVL + δ<sub>cat</sub></sup> <i>×</i> growth <i>×</i> maturity <i>×</i> token odds</div><div class="f2">curve a=${v.curve.a.toFixed(3)} b=${v.curve.b.toFixed(3)} [90% CI ${v.curve.boot.b_lo}–${v.curve.boot.b_hi}] + EB cat (k=${MODEL.cat_shrink_k}) · odds β=[${R.odds.beta.map((z) => z.toFixed(2)).join(', ')}] · fit ${R.counts.tokenized} priced + ${R.counts.protocols} odds</div></div><button class="go" id="goMethod">Method &amp; validation →</button>`;
 
 const state = { q: '', cat: '', chain: '', minTvl: 0, watch: false, grow: false, verdict: 'all', key: 'rank', dir: 1, pos: MODEL.deposit_usd, share: MODEL.drop_share };
 const cats = [...new Set(R.rows.map((r) => r.category ?? '(none)'))].sort(cmp);
@@ -148,7 +148,7 @@ function renderBoard() {
   </div>
   ${ribbon()}
   ${evidence()}
-  <div class="integrity" id="integrity"></div>
+  <div class="strips"><div class="integrity" id="integrity"></div><div class="book" id="book"></div></div>
   <div class="wrap"><table><thead><tr>${COLS.map(([k, l, c]) => `<th data-k="${k}" class="${c}" aria-sort="none">${l}</th>`).join('')}</tr></thead><tbody id="rows"></tbody></table></div>
   <p class="note">Odds = logistic p(token) from TVL and age; expected = if-launch value × odds. Drop/$1k = expected × ${Math.round(MODEL.drop_share * 100)}% × $${commas(MODEL.deposit_usd)} ÷ TVL. Net if launch = drop − gas − $${MODEL.fee_usd}. Verdict: FARM above $0 net, MARGINAL above −$10, SKIP below. The range is expected value × held-out p25/p75 ratios.</p>`;
   const run = () => fill();
@@ -191,6 +191,13 @@ function fill() {
   if (state.pos !== MODEL.deposit_usd || state.share !== MODEL.drop_share) bits.push(`${full(state.pos)} @ ${Math.round(state.share * 100)}%`);
   if (state.q) bits.push(`“${state.q}”`);
   $('#count').innerHTML = `<b>${rows.length}</b> of ${R.rows.length} rows${bits.length ? ` &middot; <span class="flt">${esc(bits.join(' · '))}</span>` : ''}`;
+  const topFarm = preLive.filter((r) => r.net_if_launch_usd > 0).sort((a, b) => b.net_if_launch_usd - a.net_if_launch_usd).slice(0, 5);
+  const bkCap = topFarm.length * state.pos;
+  const bkGas = topFarm.reduce((s, r) => s + r.gas_total_usd + MODEL.fee_usd, 0);
+  const bkNet = topFarm.reduce((s, r) => s + r.net_if_launch_usd, 0);
+  $('#book').innerHTML = topFarm.length
+    ? `<b>TOP-${topFarm.length} FARM BOOK</b> (${full(state.pos)}/ea @ ${Math.round(state.share * 100)}%) &middot; capital ${full(bkCap)} &middot; cost ${one(bkGas)} &middot; est. net <b class="up">${full(bkNet)}</b> (${((bkNet / bkCap) * 100).toFixed(1)}%)`
+    : `<b>FARM BOOK</b> &middot; no positive-net protocols in current filter`;
   view.querySelectorAll('th[data-k]').forEach((th) => {
     const on = th.dataset.k === state.key;
     th.classList.toggle('sorted', on);
@@ -255,6 +262,7 @@ function openDetail(slug) {
       <div class="row"><div class="l"><span class="k">Drop / $1k</span><span class="e">expected × ${Math.round(MODEL.drop_share * 100)}% × $1,000 ÷ TVL</span></div><span class="v">${full(r.drop_per_1k_usd)}</span></div>
       <div class="row"><div class="l"><span class="k">Net if launch</span><span class="e">drop − ${one(r.gas_total_usd)} gas − $${MODEL.fee_usd} fee</span></div><span class="v">${full(r.net_if_launch_usd)}</span></div>
       <div class="row"><div class="l"><span class="k">Net $/h</span><span class="e">net if launch ÷ ${r.hold_days}d hold</span></div><span class="v">${one(r.net_per_hour_usd)}</span></div>
+      <div class="row"><div class="l"><span class="k">Break-even drop share</span><span class="e">min % of supply to cover gas + $${MODEL.fee_usd} fee</span></div><span class="v">${(((r.gas_total_usd + MODEL.fee_usd) * r.tvl_usd) / (r.implied_value_usd * MODEL.deposit_usd) * 100).toFixed(2)}%</span></div>
     </div></div>
   </div><div>
     <div class="card"><h3>Token odds inputs</h3><div class="rows">
@@ -313,7 +321,7 @@ function renderMethod() {
   view.innerHTML = `<div class="prose">
   <h2>Two fitted models, one expected value</h2>
   <div class="formula">
-    <div>if-launch = 10^${v.curve.a.toFixed(4)} · TVL^${v.curve.b.toFixed(4)} × growth × maturity <span>OLS on ${v.fit_n} tokenized protocols</span></div>
+    <div>if-launch = 10^(${v.curve.a.toFixed(4)} + ${v.curve.b.toFixed(4)}·logTVL + δ<sub>cat</sub>) × growth × maturity <span>OLS on ${v.fit_n} tokenized (b 90% boot CI: ${v.curve.boot.b_lo}–${v.curve.boot.b_hi}, n=${v.curve.boot.n})</span></div>
     <div>odds = 1 / (1 + e^−z), z = ${o.beta[0].toFixed(3)} + ${o.beta[1].toFixed(4)}·log10(TVL) + ${o.beta[2].toFixed(4)}·log10(1 + min(age, ${MODEL.odds_max_age}))</div>
     <div>expected = max(1, round(if-launch × odds)); range = expected × held-out p25/p75 ratios</div>
     <div>growth = 1 + clamp(change_7d, ${MODEL.growth_lo}, ${MODEL.growth_hi})/100 × ${MODEL.growth_weight}; maturity = ${MODEL.maturity_base} + min(age, ${MODEL.maturity_days})/${MODEL.maturity_days} × ${MODEL.maturity_span}</div>

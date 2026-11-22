@@ -134,7 +134,29 @@ export function fitCurve(protocols, asOf) {
     p75: round(quantile(ratios, 0.75)),
     p90: round(quantile(ratios, 0.9)),
   };
-  return { live, clean, outliers, fit, filtered, catAdj, fitCatAdj, predict, ratios, curvePreds, band };
+  // Deterministic seeded bootstrap (200 resamples) for 90% CI on curve slope b and intercept a.
+  let seed = 20261122;
+  const nextRand = () => {
+    seed = (seed * 1664525 + 1013904223) >>> 0;
+    return seed / 4294967296;
+  };
+  const bootA = [];
+  const bootB = [];
+  for (let t = 0; t < 200; t++) {
+    const sample = [];
+    for (let i = 0; i < live.length; i++) sample.push(live[Math.floor(nextRand() * live.length)]);
+    const bf = logFit(sample);
+    bootA.push(bf.a);
+    bootB.push(bf.b);
+  }
+  const boot = {
+    n: 200,
+    a_lo: round(quantile(bootA, 0.05), 3),
+    a_hi: round(quantile(bootA, 0.95), 3),
+    b_lo: round(quantile(bootB, 0.05), 3),
+    b_hi: round(quantile(bootB, 0.95), 3),
+  };
+  return { live, clean, outliers, fit, filtered, catAdj, fitCatAdj, predict, ratios, curvePreds, band, boot };
 }
 
 /** Days between the snapshot day and the day DefiLlama began tracking the protocol. */
@@ -553,7 +575,7 @@ export function validate(protocols, curve, asOf) {
     fit_n: live.length,
     clean_n: clean.length,
     outlier_n: curve.outliers.length,
-    curve: { a: curve.fit.a, b: curve.fit.b, filtered_a: curve.filtered.a, filtered_b: curve.filtered.b, ...statBlock(curve.curvePreds, actuals) },
+    curve: { a: curve.fit.a, b: curve.fit.b, filtered_a: curve.filtered.a, filtered_b: curve.filtered.b, boot: curve.boot, ...statBlock(curve.curvePreds, actuals) },
     global: { median: round(quantile(live.map((p) => p.mcap_usd / p.tvl_usd), 0.5)), ...statBlock(globalPreds, live.map((p) => p.mcap_usd)) },
     house: { ...statBlock(housePreds, live.map((p) => p.mcap_usd)) },
     band: { ...band, coverage: round((bandHits / curve.ratios.length) * 100, 1), coverage80: round((band80Hits / curve.ratios.length) * 100, 1) },
