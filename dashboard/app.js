@@ -97,16 +97,17 @@ function ribbon() {
 }
 function evidence() {
   const t = R.terms;
+  const w = t.wf;
   const kept = '<span class="keep">kept</span>';
   const drop = '<span class="drop">dropped</span>';
   return `<div class="evidence">
-    <div class="ecard"><h4>Value if it launches — terms tested (LOO)</h4>
-      <div class="eline">flat median <b>${x2(t.flat)}</b> → size curve <b>${x2(t.size)}</b> → +priors <b>${x2(t.priors)}</b></div>
-      <div class="eline">+ EB category (k=${MODEL.cat_shrink_k}) <b>${x2(t.curve)}</b> ${kept} · walk-fwd <b>${x2(v.walk.median_miss)}</b></div>
-      <div class="eline">+ fitted 7d growth <b>${x2(t.growth)}</b> ${drop} · + fitted maturity <b>${x2(t.maturity)}</b> ${drop}</div></div>
-    <div class="ecard"><h4>Token odds — Brier</h4>
-      <div class="eline">base rate Brier <b>${baseBrier.toFixed(3)}</b> · logistic in-sample <b>${R.odds.brier_in.toFixed(3)}</b></div>
-      <div class="eline">logistic leave-one-out <b>${R.odds.brier_loo.toFixed(3)}</b> ${kept}</div>
+    <div class="ecard"><h4>Value if it launches — tested twice (LOO · WF)</h4>
+      <div class="eline">flat <b>${x2(t.flat)}</b>·${x2(w.flat)} → size <b>${x2(t.size)}</b>·${x2(w.size)} → +priors <b>${x2(t.priors)}</b>·${x2(w.priors)}</div>
+      <div class="eline">+ EB cat (k=${MODEL.cat_shrink_k}) <b>${x2(t.curve)}</b>·<b>${x2(w.curve)}</b> ${kept} (n=${t.n}, ${w.n})</div>
+      <div class="eline">+ fit growth <b>${x2(t.growth)}</b>·${x2(w.growth)} ${drop} · + fit age <b>${x2(t.maturity)}</b>·${x2(w.maturity)} ${drop}</div></div>
+    <div class="ecard"><h4>Token odds — Brier (LOO · WF)</h4>
+      <div class="eline">base rate <b>${baseBrier.toFixed(3)}</b> · logistic in-sample <b>${R.odds.brier_in.toFixed(3)}</b></div>
+      <div class="eline">logistic leave-one-out <b>${R.odds.brier_loo.toFixed(3)}</b> ${kept} (beats base)</div>
       <div class="eline">walk-forward <b>${R.odds.walk.brier.toFixed(3)}</b> vs base ${R.odds.walk.base_brier.toFixed(3)} (n=${R.odds.walk.test_n})</div></div>
     <div class="ecard"><h4>Is the printed range honest?</h4>
       <div class="bigstat">${v.band.coverage}% <span class="substat">(50% nom) · ${v.band.coverage80}% (80% nom)</span></div>
@@ -307,14 +308,15 @@ function renderAside() {
 function renderMethod() {
   const c = R.counts, t = R.terms, o = R.odds;
   const status = (n, cut) => n <= cut ? '<span class="keep">kept</span>' : '<span class="drop">dropped</span>';
+  const w = t.wf;
   const termRows = [
-    ['Flat global median multiple', t.flat, '<span class="drop">baseline</span>'],
-    ['Log-log size curve (TVL)', t.size, '<span class="keep">kept</span>'],
-    ['+ stated growth & maturity priors', t.priors, '<span class="keep">kept</span>'],
-    [`+ EB category shrinkage (k=${MODEL.cat_shrink_k})`, t.curve, '<span class="keep">kept</span>'],
-    ['+ fitted 7-day growth', t.growth, status(t.growth, t.curve)],
-    ['+ fitted maturity', t.maturity, status(t.maturity, t.curve)],
-  ].map(([n, m, s]) => `<tr><td>${n}</td><td class="num">${x2(m)}</td><td>${s}</td></tr>`).join('');
+    ['Flat global median multiple', t.flat, w.flat, '<span class="drop">baseline</span>'],
+    ['Log-log size curve (TVL)', t.size, w.size, '<span class="keep">kept</span>'],
+    ['+ stated growth & maturity priors', t.priors, w.priors, '<span class="keep">kept</span>'],
+    [`+ EB category shrinkage (k=${MODEL.cat_shrink_k})`, t.curve, w.curve, '<span class="keep">kept</span>'],
+    ['+ fitted 7-day growth', t.growth, w.growth, status(t.growth, t.curve)],
+    ['+ fitted maturity', t.maturity, w.maturity, status(t.maturity, t.curve)],
+  ].map(([n, m, wm, s]) => `<tr><td>${n}</td><td class="num">${x2(m)}</td><td class="num">${x2(wm)}</td><td>${s}</td></tr>`).join('');
   const catRows = R.categories.filter((k) => k.n >= 5).sort((a, b) => b.n - a.n || cmp(a.name, b.name)).map((k) => `<tr><td>${esc(k.name)}</td><td class="num">${k.n}</td><td class="num">${x(k.median)}</td><td class="num">${k.rows}</td></tr>`).join('');
   const outRows = v.outliers.map((q) => `<tr><td>${esc(q.name)}</td><td class="sub">${esc(q.category ?? 'none')}</td><td class="num">${q.ratio}</td><td class="num">${usd(q.tvl_usd)}</td></tr>`).join('');
   const modelRow = (name, s) => `<tr><td>${name}</td><td class="num">${x2(s.median_miss)}</td><td class="num">${s.within_2x}%</td><td class="num">${s.within_3x}%</td><td class="num">${s.spearman}</td></tr>`;
@@ -327,7 +329,7 @@ function renderMethod() {
     <div>growth = 1 + clamp(change_7d, ${MODEL.growth_lo}, ${MODEL.growth_hi})/100 × ${MODEL.growth_weight}; maturity = ${MODEL.maturity_base} + min(age, ${MODEL.maturity_days})/${MODEL.maturity_days} × ${MODEL.maturity_span}</div>
   </div>
   <div class="mgrid"><div>
-    <div class="card"><h3>Terms tested, held out</h3><table class="mtab"><tr><th>Model</th><th class="num">Median miss</th><th>Decision</th></tr>${termRows}</table>
+    <div class="card"><h3>Terms tested twice (LOO &amp; walk-forward)</h3><table class="mtab"><tr><th>Model</th><th class="num">LOO</th><th class="num">Walk-fwd</th><th>Decision</th></tr>${termRows}</table>
       <p class="note">The flat multiple misses ${x2(t.flat)}; the curve and stated priors miss ${x2(t.curve)}. Fitting growth freely gives ${x2(t.growth)} and fitting maturity freely ${x2(t.maturity)} — both worse than the priors, so growth ${MODEL.growth_weight} and maturity ${MODEL.maturity_base}–1.00 stay as stated priors. n=${t.n}.</p></div>
     <div class="card"><h3>Token odds, Brier against the base rate</h3><table class="mtab"><tr><th>Block</th><th class="num">Logistic</th><th class="num">Base rate</th></tr>
       <tr><td>In-sample</td><td class="num">${o.brier_in.toFixed(3)}</td><td class="num">${baseBrier.toFixed(3)}</td></tr>

@@ -498,7 +498,7 @@ function olsMulti(X, y) {
   return solve3(A, rhs);
 }
 
-/** Cumulative held-out term tests: flat, size curve, +priors, +EB category, +fitted growth/maturity. */
+/** Cumulative held-out term tests — tested TWICE: LOO (n=121) and Walk-Forward (older 60% -> newer 40%). */
 export function termsTest(protocols, curve, asOf) {
   const live = curve.live;
   const clean = curve.clean;
@@ -529,6 +529,21 @@ export function termsTest(protocols, curve, asOf) {
   };
   const g = (p) => clamp(p.change_7d ?? 0, MODEL.growth_lo, MODEL.growth_hi) / 100;
   const age = (p) => maturityFactor(p, asOf);
+
+  // Second held-out test: Walk-forward (older 60% dated -> newer 40% dated)
+  const dated = clean.filter((p) => p.listed_at).slice().sort((a, b) => (a.listed_at < b.listed_at ? -1 : a.listed_at > b.listed_at ? 1 : a.slug < b.slug ? -1 : 1));
+  const cut = Math.floor(dated.length * 0.6);
+  const wfTr = dated.slice(0, cut);
+  const wfTe = dated.slice(cut);
+  const wfMed = quantile(wfTr.map((x) => x.mcap_usd / x.tvl_usd), 0.5);
+  const wfF = logFit(wfTr);
+  const wfCat = curve.fitCatAdj(wfTr, wfF);
+  const wfMiss = (preds) => round(10 ** quantile(preds.map((pr, i) => Math.abs(Math.log10(pr / wfTe[i].mcap_usd))), 0.5), 3);
+  const wfTerm = (term) => {
+    const beta = olsMulti(wfTr.map((p) => [1, Math.log10(p.tvl_usd), term(p)]), wfTr.map((p) => Math.log10(p.mcap_usd)));
+    return wfMiss(wfTe.map((p) => 10 ** (beta[0] + beta[1] * Math.log10(p.tvl_usd) + beta[2] * term(p))));
+  };
+
   return {
     flat: round(10 ** quantile(flat, 0.5), 3),
     size: round(10 ** quantile(curveOnly, 0.5), 3),
@@ -536,6 +551,15 @@ export function termsTest(protocols, curve, asOf) {
     curve: round(10 ** quantile(ebErr, 0.5), 3),
     growth: fitTerm(g),
     maturity: fitTerm(age),
+    wf: {
+      flat: wfMiss(wfTe.map((p) => p.tvl_usd * wfMed)),
+      size: wfMiss(wfTe.map((p) => 10 ** (wfF.a + wfF.b * Math.log10(p.tvl_usd)))),
+      priors: wfMiss(wfTe.map((p) => 10 ** (wfF.a + wfF.b * Math.log10(p.tvl_usd)) * growthFactor(p) * maturityFactor(p, asOf))),
+      curve: wfMiss(wfTe.map((p) => 10 ** (wfF.a + wfF.b * Math.log10(p.tvl_usd) + (wfCat[p.category ?? '(none)'] ?? 0)) * growthFactor(p) * maturityFactor(p, asOf))),
+      growth: wfTerm(g),
+      maturity: wfTerm(age),
+      n: wfTe.length,
+    },
     n: clean.length,
   };
 }
