@@ -1,6 +1,6 @@
 // Constants shared by main.ts's fitted model and the page's own recomputation.
 export const MODEL = {
-  version: 'radar-curve-2',
+  version: 'radar-curve-3',
   growth_weight: 0.35,
   growth_lo: -60,
   growth_hi: 120,
@@ -9,6 +9,8 @@ export const MODEL = {
   maturity_days: 1095,
   age_assumed_days: 365,
   odds_max_age: 2000,
+  cat_shrink_k: 12,
+  min_peers: 5,
   ratio_lo: 0.005,
   ratio_hi: 50,
   drop_share: 0.07,

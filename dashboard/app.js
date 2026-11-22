@@ -15,29 +15,31 @@ const one = (n) => `$${n.toFixed(2)}`;
 const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 const age = (r) => `${r.age_days}d${r.age_assumed ? '<span class="badge assume">assumed</span>' : ''}`;
 const clamp = (n, lo, hi) => Math.min(hi, Math.max(lo, n));
-const verdict = (r) => r.net_if_launch_usd > 0 ? ['FARM', 'farm'] : r.net_if_launch_usd > -10 ? ['MARGINAL', 'marg'] : ['SKIP', 'skip'];
+const verdictNet = (net) => net > 0 ? ['FARM', 'farm'] : net > -10 ? ['MARGINAL', 'marg'] : ['SKIP', 'skip'];
+const verdict = (r) => verdictNet(r.net_if_launch_usd);
 
 const view = $('#view');
 if (!R) { view.innerHTML = '<p class="empty">No radar loaded: run <b>node main.ts</b> to write data.js.</p>'; throw new Error('data.js missing'); }
 const v = R.validation;
 const baseBrier = R.odds.base_rate * (1 - R.odds.base_rate);
 
-/** Recompute one row from snapshot inputs, constants, curve and odds coefficients. */
-function rec(r) {
+/** Recompute one row from snapshot inputs, constants, curve, EB category adj and odds. */
+function rec(r, pos = MODEL.deposit_usd, share = MODEL.drop_share) {
   const g = Math.round((1 + (clamp(r.change_7d ?? 0, MODEL.growth_lo, MODEL.growth_hi) / 100) * MODEL.growth_weight) * 1e4) / 1e4;
   const a = r.age_assumed ? MODEL.age_assumed_days : r.age_days;
   const mat = Math.round((MODEL.maturity_base + (Math.min(a, MODEL.maturity_days) / MODEL.maturity_days) * MODEL.maturity_span) * 1e4) / 1e4;
-  const base = 10 ** R.curve.a * Math.pow(r.tvl_usd, R.curve.b);
+  const adj = (R.curve.cat_adj && R.curve.cat_adj[r.category ?? '(none)']) ?? 0;
+  const base = 10 ** (R.curve.a + R.curve.b * Math.log10(r.tvl_usd) + adj);
   const ifLaunch = Math.max(1, Math.round(base * g * mat));
   const z = R.odds.beta[0] + R.odds.beta[1] * Math.log10(r.tvl_usd) + R.odds.beta[2] * Math.log10(1 + Math.min(a, MODEL.odds_max_age));
   const odds = 1 / (1 + Math.exp(-z));
   const implied = Math.max(1, Math.round(ifLaunch * odds));
   const low = Math.max(1, Math.round(implied * R.curve.band.p25));
   const high = Math.max(1, Math.round(implied * R.curve.band.p75));
-  const drop = Math.round((implied * MODEL.drop_share * MODEL.deposit_usd) / r.tvl_usd);
+  const drop = Math.round((implied * share * pos) / r.tvl_usd);
   const net = drop - r.gas_total_usd - MODEL.fee_usd;
   const hours = r.hold_days * 24 + (r.family === 'rwa' ? 8 : r.family === 'staking' ? 4 : 1);
-  return { base, ifLaunch, odds: Math.round(odds * 1e4) / 1e4, implied, low, high, drop, net: Math.round(net * 100) / 100, netHour: Math.round((net / hours) * 1e4) / 1e4 };
+  return { base, adj, ifLaunch, odds: Math.round(odds * 1e4) / 1e4, implied, low, high, drop, net: Math.round(net * 100) / 100, netHour: Math.round((net / hours) * 1e4) / 1e4 };
 }
 const close = (a, b, tol) => Math.abs(a - b) <= tol;
 function integrity() {
@@ -62,9 +64,9 @@ $('#kpis').innerHTML = [
   [`${v.band.coverage}%`, 'range covers (stated 50%)'],
   [R.counts.set_aside, 'set aside by rule'],
 ].map(([b, s]) => `<div class="kpi"><b>${b}</b><span>${s}</span></div>`).join('');
-$('#methodbar').innerHTML = `<div class="mtext"><div class="f">expected = 10<sup>a</sup>·TVL<sup>b</sup> <i>×</i> growth <i>×</i> maturity <i>×</i> token odds</div><div class="f2">curve a=${v.curve.a.toFixed(3)} b=${v.curve.b.toFixed(3)} · odds β=[${R.odds.beta.map((z) => z.toFixed(2)).join(', ')}] · fit ${R.counts.tokenized} priced + ${R.counts.protocols} odds</div></div><button class="go" id="goMethod">Method &amp; validation →</button>`;
+$('#methodbar').innerHTML = `<div class="mtext"><div class="f">expected = 10<sup>a + b·logTVL + δ<sub>cat</sub></sup> <i>×</i> growth <i>×</i> maturity <i>×</i> token odds</div><div class="f2">curve a=${v.curve.a.toFixed(3)} b=${v.curve.b.toFixed(3)} + EB cat (k=${MODEL.cat_shrink_k}) · odds β=[${R.odds.beta.map((z) => z.toFixed(2)).join(', ')}] · fit ${R.counts.tokenized} priced + ${R.counts.protocols} odds</div></div><button class="go" id="goMethod">Method &amp; validation →</button>`;
 
-const state = { q: '', cat: '', chain: '', minTvl: 0, watch: false, grow: false, verdict: 'all', key: 'rank', dir: 1 };
+const state = { q: '', cat: '', chain: '', minTvl: 0, watch: false, grow: false, verdict: 'all', key: 'rank', dir: 1, pos: MODEL.deposit_usd, share: MODEL.drop_share };
 const cats = [...new Set(R.rows.map((r) => r.category ?? '(none)'))].sort(cmp);
 const chainCount = new Map();
 for (const r of R.rows) for (const c of r.chains) chainCount.set(c, (chainCount.get(c) ?? 0) + 1);
@@ -98,21 +100,18 @@ function evidence() {
   const kept = '<span class="keep">kept</span>';
   const drop = '<span class="drop">dropped</span>';
   return `<div class="evidence">
-    <div class="ecard"><h4>Value if it launches — terms tested</h4>
-      <div class="eline">flat global median <b>${x2(t.flat)}</b></div>
-      <div class="eline">size curve + priors <b>${x2(t.curve)}</b> ${kept}</div>
-      <div class="eline">+ fitted 7d growth <b>${x2(t.growth)}</b> ${drop}</div>
-      <div class="eline">+ fitted maturity <b>${x2(t.maturity)}</b> ${drop}</div></div>
+    <div class="ecard"><h4>Value if it launches — terms tested (LOO)</h4>
+      <div class="eline">flat median <b>${x2(t.flat)}</b> → size curve <b>${x2(t.size)}</b> → +priors <b>${x2(t.priors)}</b></div>
+      <div class="eline">+ EB category (k=${MODEL.cat_shrink_k}) <b>${x2(t.curve)}</b> ${kept} · walk-fwd <b>${x2(v.walk.median_miss)}</b></div>
+      <div class="eline">+ fitted 7d growth <b>${x2(t.growth)}</b> ${drop} · + fitted maturity <b>${x2(t.maturity)}</b> ${drop}</div></div>
     <div class="ecard"><h4>Token odds — Brier</h4>
-      <div class="eline">base rate Brier <b>${baseBrier.toFixed(3)}</b></div>
-      <div class="eline">logistic in-sample <b>${R.odds.brier_in.toFixed(3)}</b></div>
-      <div class="eline">logistic leave-one-out <b>${R.odds.brier_loo.toFixed(3)}</b></div>
-      <div class="eline">walk-forward <b>${R.odds.walk.brier.toFixed(3)}</b> vs base ${R.odds.walk.base_brier.toFixed(3)}</div></div>
+      <div class="eline">base rate Brier <b>${baseBrier.toFixed(3)}</b> · logistic in-sample <b>${R.odds.brier_in.toFixed(3)}</b></div>
+      <div class="eline">logistic leave-one-out <b>${R.odds.brier_loo.toFixed(3)}</b> ${kept}</div>
+      <div class="eline">walk-forward <b>${R.odds.walk.brier.toFixed(3)}</b> vs base ${R.odds.walk.base_brier.toFixed(3)} (n=${R.odds.walk.test_n})</div></div>
     <div class="ecard"><h4>Is the printed range honest?</h4>
-      <div class="bigstat">${v.band.coverage}%</div>
-      <div class="eline">inside P25–P75, against a stated 50%</div>
-      <div class="eline">P25 ${R.curve.band.p25.toFixed(3)}× · P75 ${R.curve.band.p75.toFixed(3)}×</div>
-      <div class="eline hi">curve ${x2(v.curve.median_miss)} · global ${x2(v.global.median_miss)} · house ${x2(v.house.median_miss)}</div></div>
+      <div class="bigstat">${v.band.coverage}% <span class="substat">(50% nom) · ${v.band.coverage80}% (80% nom)</span></div>
+      <div class="eline">P25–P75: ${R.curve.band.p25.toFixed(3)}×–${R.curve.band.p75.toFixed(3)}× · P10–P90: ${R.curve.band.p10.toFixed(3)}×–${R.curve.band.p90.toFixed(3)}×</div>
+      <div class="eline hi">curve+EB ${x2(v.curve.median_miss)} · global ${x2(v.global.median_miss)} · house ${x2(v.house.median_miss)}</div></div>
   </div>`;
 }
 function chartSvg(W = 620, H = 280) {
@@ -140,8 +139,10 @@ function renderBoard() {
     <select id="cat" aria-label="Category"><option value="">All categories</option>${cats.map((c) => `<option value="${esc(c)}"${c === state.cat ? ' selected' : ''}>${esc(c)}</option>`).join('')}</select>
     <select id="chain" aria-label="Chain"><option value="">All chains</option>${chains.map((c) => `<option value="${esc(c)}"${c === state.chain ? ' selected' : ''}>${esc(c)}</option>`).join('')}</select>
     <label class="slider">min TVL <input type="range" id="minTvl" min="0" max="${Math.ceil(maxTvl / 1e7) * 10}" step="5" value="${state.minTvl / 1e6}" aria-label="Minimum TVL in millions"><output id="minOut">${usd(state.minTvl)}</output></label>
-    <label class="check"><input type="checkbox" id="watch"${state.watch ? ' checked' : ''}> watchlist only</label>
-    <label class="check"><input type="checkbox" id="grow"${state.grow ? ' checked' : ''}> 7d growing</label>
+    <label class="check"><input type="checkbox" id="watch"${state.watch ? ' checked' : ''}> watchlist</label>
+    <label class="check"><input type="checkbox" id="grow"${state.grow ? ' checked' : ''}> 7d+</label>
+    <label class="miniinp">pos <select id="posSel" aria-label="Position size">${[500, 1000, 5000, 10000].map((v2) => `<option value="${v2}"${v2 === state.pos ? ' selected' : ''}>${full(v2)}</option>`).join('')}</select></label>
+    <label class="miniinp">drop <select id="shareSel" aria-label="Airdrop share">${[0.05, 0.07, 0.1].map((v2) => `<option value="${v2}"${v2 === state.share ? ' selected' : ''}>${Math.round(v2 * 100)}%</option>`).join('')}</select></label>
     <span class="vchips" id="vchips"></span>
     <span class="count" id="count"></span>
   </div>
@@ -157,6 +158,8 @@ function renderBoard() {
   $('#minTvl').addEventListener('input', (e) => { state.minTvl = Number(e.target.value) * 1e6; $('#minOut').textContent = usd(state.minTvl); run(); });
   $('#watch').addEventListener('change', (e) => { state.watch = e.target.checked; run(); });
   $('#grow').addEventListener('change', (e) => { state.grow = e.target.checked; run(); });
+  $('#posSel').addEventListener('change', (e) => { state.pos = Number(e.target.value); run(); });
+  $('#shareSel').addEventListener('change', (e) => { state.share = Number(e.target.value); run(); });
   view.querySelectorAll('th[data-k]').forEach((th) => th.addEventListener('click', () => { const k = th.dataset.k; state.dir = state.key === k ? -state.dir : (k === 'rank' || k === 'name' ? 1 : -1); state.key = k; run(); }));
   fill();
   const I = integrity();
@@ -165,11 +168,19 @@ function renderBoard() {
 
 function fill() {
   const pre = preVerdict();
-  const counts = { all: pre.length, farm: 0, marg: 0, skip: 0 };
-  for (const r of pre) counts[verdict(r)[1]]++;
+  const liveRow = (r) => (state.pos === MODEL.deposit_usd && state.share === MODEL.drop_share) ? r : (() => { const c = rec(r, state.pos, state.share); return { ...r, drop_per_1k_usd: c.drop, net_if_launch_usd: c.net, net_per_hour_usd: c.netHour }; })();
+  const preLive = pre.map(liveRow);
+  const counts = { all: preLive.length, farm: 0, marg: 0, skip: 0 };
+  for (const r of preLive) counts[verdict(r)[1]]++;
   $('#vchips').innerHTML = [['all', 'All'], ['farm', 'Farm'], ['marg', 'Marginal'], ['skip', 'Skip']].map(([k, l]) => `<button class="vchip${state.verdict === k ? ' on' : ''}" data-v="${k}">${l} ${counts[k]}</button>`).join('');
   view.querySelectorAll('[data-v]').forEach((b) => b.addEventListener('click', () => { state.verdict = b.dataset.v; fill(); }));
-  const rows = filtered();
+  const rows = preLive.filter((r) => state.verdict === 'all' || verdict(r)[1] === state.verdict).sort((a, b) => {
+    const va = a[state.key], vb = b[state.key];
+    if (va === vb) return a.rank - b.rank;
+    if (va === null) return 1;
+    if (vb === null) return -1;
+    return (typeof va === 'string' ? cmp(va, vb) : va - vb) * state.dir;
+  });
   const bits = [];
   if (state.cat) bits.push(state.cat);
   if (state.chain) bits.push(state.chain);
@@ -177,9 +188,15 @@ function fill() {
   if (state.watch) bits.push('watchlist only');
   if (state.grow) bits.push('7d growing');
   if (state.verdict !== 'all') bits.push(`${state.verdict} verdict`);
+  if (state.pos !== MODEL.deposit_usd || state.share !== MODEL.drop_share) bits.push(`${full(state.pos)} @ ${Math.round(state.share * 100)}%`);
   if (state.q) bits.push(`“${state.q}”`);
   $('#count').innerHTML = `<b>${rows.length}</b> of ${R.rows.length} rows${bits.length ? ` &middot; <span class="flt">${esc(bits.join(' · '))}</span>` : ''}`;
-  view.querySelectorAll('th[data-k]').forEach((th) => { const on = th.dataset.k === state.key; th.classList.toggle('sorted', on); th.textContent = COLS.find((c) => c[0] === th.dataset.k)[1] + (on ? (state.dir > 0 ? ' ▲' : ' ▼') : ''); });
+  view.querySelectorAll('th[data-k]').forEach((th) => {
+    const on = th.dataset.k === state.key;
+    th.classList.toggle('sorted', on);
+    const baseLabel = th.dataset.k === 'drop_per_1k_usd' ? `Drop/${usd(state.pos)}` : COLS.find((c) => c[0] === th.dataset.k)[1];
+    th.textContent = baseLabel + (on ? (state.dir > 0 ? ' ▲' : ' ▼') : '');
+  });
   $('#rows').innerHTML = rows.length ? rows.map((r) => {
     const badge = `${r.watchlist ? '<span class="badge wl">WATCHLIST</span>' : '<span class="badge early">BELOW FLOOR</span>'}${r.missing.length ? `<span class="badge assume">${r.missing.length} missing</span>` : ''}`;
     const [vl, vc] = verdict(r);
@@ -223,16 +240,16 @@ function openDetail(slug) {
     <button class="dclose" id="dclose">Close ✕</button></div>
   <div class="dhero"><div class="dvalue"><div class="big">${full(r.implied_value_usd)} <span class="heroSub">expected</span></div>
     <div class="eq">${full(r.if_launch_usd)} if it launches × ${(r.odds * 100).toFixed(1)}% odds = ${full(r.implied_value_usd)} expected</div>
-    <div class="note">if-launch = 10^${v.curve.a.toFixed(3)} · TVL^${v.curve.b.toFixed(3)} × ${r.growth_mult.toFixed(3)} growth × ${r.maturity.toFixed(3)} maturity. Interval = expected × held-out ${r.ratio_lo.toFixed(3)}× / ${r.ratio_hi.toFixed(3)}×.<br>Recomputed here: <b>${full(c.implied)}</b>; the row says <b>${full(r.implied_value_usd)}</b> — ${c.implied === r.implied_value_usd ? 'match' : 'MISMATCH'}.</div></div>
-    <div class="dband"><div class="lab">P25–P75 expected-value interval</div>
+    <div class="note">if-launch = 10^(${v.curve.a.toFixed(3)} + ${v.curve.b.toFixed(3)}·logTVL ${(c.adj >= 0 ? '+' : '−')} ${Math.abs(c.adj).toFixed(3)} EB cat) × ${r.growth_mult.toFixed(3)} growth × ${r.maturity.toFixed(3)} maturity. Interval = expected × held-out ${r.ratio_lo.toFixed(3)}× / ${r.ratio_hi.toFixed(3)}×.<br>Recomputed here: <b>${full(c.implied)}</b>; the row says <b>${full(r.implied_value_usd)}</b> — ${c.implied === r.implied_value_usd ? 'match' : 'MISMATCH'}.</div></div>
+    <div class="dband"><div class="lab">P25–P75 (${v.band.coverage}% cov) &amp; P10–P90 (${v.band.coverage80}% cov) interval</div>
       <div class="nums"><span>P25 <b>${usd(r.low_usd)}</b></span><span>expected <b>${usd(r.implied_value_usd)}</b></span><span>P75 <b>${usd(r.high_usd)}</b></span></div>${bandMarkup(r)}
-      <div class="nums" style="margin-top:6px"><span class="mut">${r.ratio_lo.toFixed(3)}×</span><span class="mut">1.000×</span><span class="mut">${r.ratio_hi.toFixed(3)}×</span></div></div></div>
+      <div class="nums" style="margin-top:6px"><span class="mut">P10 ${usd(Math.max(1, Math.round(r.implied_value_usd * R.curve.band.p10)))}</span><span class="mut">${r.ratio_lo.toFixed(3)}×–${r.ratio_hi.toFixed(3)}×</span><span class="mut">P90 ${usd(Math.max(1, Math.round(r.implied_value_usd * R.curve.band.p90)))}</span></div></div></div>
   <div class="dcols"><div>
     <div class="card"><h3>Model inputs from the snapshot</h3><div class="rows">
       <div class="row"><div class="l"><span class="k">TVL</span><span class="e">tvl_usd</span></div><span class="v">${full(r.tvl_usd)}</span></div>
       <div class="row"><div class="l"><span class="k">7d TVL change</span><span class="e">${r.change_7d === null ? 'not reported' : `${r.change_7d.toFixed(2)}%, counted ${r.growth_counted}%`}</span></div><span class="v">${pct(r.change_7d)} → ×${r.growth_mult.toFixed(3)}</span></div>
       <div class="row"><div class="l"><span class="k">No-token age</span><span class="e">${esc(r.age_basis)}</span></div><span class="v">${r.age_days}d</span></div>
-      <div class="row"><div class="l"><span class="k">Curve base</span><span class="e">10^a × TVL^b</span></div><span class="v">${full(r.base_usd)}</span></div>
+      <div class="row"><div class="l"><span class="k">Curve + EB cat</span><span class="e">10^(a + b·logTVL + ${(c.adj >= 0 ? '+' : '') + c.adj.toFixed(4)})</span></div><span class="v">${full(r.base_usd)}</span></div>
       <div class="row"><div class="l"><span class="k">If it launches</span><span class="e">base × growth × maturity</span></div><span class="v">${full(r.if_launch_usd)}</span></div>
       <div class="row"><div class="l"><span class="k">Expected value</span><span class="e">if launches × token odds</span></div><span class="v acc">${full(r.implied_value_usd)}</span></div>
       <div class="row"><div class="l"><span class="k">Drop / $1k</span><span class="e">expected × ${Math.round(MODEL.drop_share * 100)}% × $1,000 ÷ TVL</span></div><span class="v">${full(r.drop_per_1k_usd)}</span></div>
@@ -282,7 +299,14 @@ function renderAside() {
 function renderMethod() {
   const c = R.counts, t = R.terms, o = R.odds;
   const status = (n, cut) => n <= cut ? '<span class="keep">kept</span>' : '<span class="drop">dropped</span>';
-  const termRows = [['Flat global median multiple', t.flat, status(t.flat, 4)], ['+ size curve and stated priors', t.curve, status(t.curve, 4)], ['+ fitted 7-day growth', t.growth, status(t.growth, t.curve)], ['+ fitted maturity', t.maturity, status(t.maturity, t.curve)]].map(([n, m, s]) => `<tr><td>${n}</td><td class="num">${x2(m)}</td><td>${s}</td></tr>`).join('');
+  const termRows = [
+    ['Flat global median multiple', t.flat, '<span class="drop">baseline</span>'],
+    ['Log-log size curve (TVL)', t.size, '<span class="keep">kept</span>'],
+    ['+ stated growth & maturity priors', t.priors, '<span class="keep">kept</span>'],
+    [`+ EB category shrinkage (k=${MODEL.cat_shrink_k})`, t.curve, '<span class="keep">kept</span>'],
+    ['+ fitted 7-day growth', t.growth, status(t.growth, t.curve)],
+    ['+ fitted maturity', t.maturity, status(t.maturity, t.curve)],
+  ].map(([n, m, s]) => `<tr><td>${n}</td><td class="num">${x2(m)}</td><td>${s}</td></tr>`).join('');
   const catRows = R.categories.filter((k) => k.n >= 5).sort((a, b) => b.n - a.n || cmp(a.name, b.name)).map((k) => `<tr><td>${esc(k.name)}</td><td class="num">${k.n}</td><td class="num">${x(k.median)}</td><td class="num">${k.rows}</td></tr>`).join('');
   const outRows = v.outliers.map((q) => `<tr><td>${esc(q.name)}</td><td class="sub">${esc(q.category ?? 'none')}</td><td class="num">${q.ratio}</td><td class="num">${usd(q.tvl_usd)}</td></tr>`).join('');
   const modelRow = (name, s) => `<tr><td>${name}</td><td class="num">${x2(s.median_miss)}</td><td class="num">${s.within_2x}%</td><td class="num">${s.within_3x}%</td><td class="num">${s.spearman}</td></tr>`;

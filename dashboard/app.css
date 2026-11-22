@@ -178,6 +178,9 @@ td.rank.top{color:var(--acc);font-weight:700;}
 .keep{color:var(--acc);font-size:8.5px;font-weight:700;letter-spacing:.04em;}
 .drop{color:var(--red);font-size:8.5px;font-weight:700;letter-spacing:.04em;}
 .bigstat{font-size:18px;font-weight:700;color:var(--acc);line-height:1.1;margin:0 0 1px;}
+.substat{font-size:10px;font-weight:500;color:var(--muted);}
+.miniinp{display:inline-flex;align-items:center;gap:4px;color:var(--muted);font-size:10.5px;}
+.miniinp select{padding:3px 5px;font-size:10.5px;}
 .integrity{border:1px solid var(--acc-dim);background:rgba(29,76,56,.16);border-radius:4px;padding:4px 8px;font-size:10px;color:var(--muted);margin-bottom:6px;}
 .integrity b{color:var(--acc);}
 .vchips{display:inline-flex;gap:3px;}

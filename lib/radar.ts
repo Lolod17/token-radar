@@ -81,8 +81,8 @@ export function logFit(ps) {
   return { a: my - b * mx, b, n };
 }
 
-/** Fit the comps curve; the seven ratios outside [0.005, 50] are flagged and
- * excluded from the held-out band and scoring sample (121 of 128). */
+/** Fit the comps curve + Empirical-Bayes category residual shrinkage (k=12).
+ * Seven ratios outside [0.005, 50] are flagged and excluded from scoring (121 of 128). */
 export function fitCurve(protocols, asOf) {
   const live = protocols.filter(isTokenized);
   const inWindow = (p) => {
@@ -94,19 +94,47 @@ export function fitCurve(protocols, asOf) {
     slug: p.slug, name: p.name, category: p.category, tvl_usd: p.tvl_usd,
     mcap_usd: p.mcap_usd, ratio: round(p.mcap_usd / p.tvl_usd, 6),
   }));
+  const fitCatAdj = (train, f) => {
+    const byCat = new Map();
+    for (const q of train) {
+      const c = q.category ?? '(none)';
+      const res = Math.log10(q.mcap_usd) - (f.a + f.b * Math.log10(q.tvl_usd));
+      if (!byCat.has(c)) byCat.set(c, []);
+      byCat.get(c).push(res);
+    }
+    const adj = {};
+    for (const [c, rs] of byCat) {
+      const mean = rs.reduce((s, v) => s + v, 0) / (rs.length + MODEL.cat_shrink_k);
+      adj[c] = round(mean, 5);
+    }
+    return adj;
+  };
   const fit = logFit(live);
   const filtered = logFit(clean);
-  const predict = (tvl) => 10 ** fit.a * tvl ** fit.b;
+  const catAdj = fitCatAdj(live, fit);
+  const predict = (tvl, category) => {
+    const adj = catAdj[category ?? '(none)'] ?? 0;
+    return 10 ** (fit.a + fit.b * Math.log10(tvl) + adj);
+  };
   const ratios = [];
   const curvePreds = [];
   for (const p of clean) {
-    const f = logFit(live.filter((x) => x !== p));
-    const pred = 10 ** f.a * p.tvl_usd ** f.b * growthFactor(p) * maturityFactor(p, asOf);
+    const tr = live.filter((x) => x !== p);
+    const f = logFit(tr);
+    const cAdj = fitCatAdj(tr, f);
+    const adj = cAdj[p.category ?? '(none)'] ?? 0;
+    const pred = 10 ** (f.a + f.b * Math.log10(p.tvl_usd) + adj) * growthFactor(p) * maturityFactor(p, asOf);
     ratios.push(p.mcap_usd / pred);
     curvePreds.push(pred);
   }
-  const band = { n: ratios.length, p25: round(quantile(ratios, 0.25)), p75: round(quantile(ratios, 0.75)) };
-  return { live, clean, outliers, fit, filtered, predict, ratios, curvePreds, band };
+  const band = {
+    n: ratios.length,
+    p10: round(quantile(ratios, 0.1)),
+    p25: round(quantile(ratios, 0.25)),
+    p75: round(quantile(ratios, 0.75)),
+    p90: round(quantile(ratios, 0.9)),
+  };
+  return { live, clean, outliers, fit, filtered, catAdj, fitCatAdj, predict, ratios, curvePreds, band };
 }
 
 /** Days between the snapshot day and the day DefiLlama began tracking the protocol. */
@@ -148,13 +176,14 @@ export function score(p, asOf, curve, odds) {
   const assumed = actualAge === null;
   const age = assumed ? MODEL.age_assumed_days : actualAge;
   const maturity = maturityFactor(p, asOf);
-  const base = curve.predict(p.tvl_usd);
+  const base = curve.predict(p.tvl_usd, p.category);
+  const catAdj = curve.catAdj[p.category ?? '(none)'] ?? 0;
   const ifLaunch = Math.max(MODEL.value_floor_usd, Math.round(base * growth * maturity));
   const implied = Math.max(MODEL.value_floor_usd, Math.round(ifLaunch * odds));
   const low = Math.max(MODEL.value_floor_usd, Math.round(implied * curve.band.p25));
   const high = Math.max(MODEL.value_floor_usd, Math.round(implied * curve.band.p75));
   const missing = [];
-  if (p.category === null) missing.push('category: not recorded; the curve does not use it');
+  if (p.category === null) missing.push('category: not recorded; EB category adjustment held at 0');
   if (p.change_7d === null) missing.push('change_7d: not reported, the growth factor is held at 1.000');
   if (p.listed_at === null) missing.push(`listed_at: not reported, age is assumed to be ${MODEL.age_assumed_days} days (maturity ${maturity.toFixed(3)})`);
   return {
@@ -164,6 +193,7 @@ export function score(p, asOf, curve, odds) {
     age_days: age,
     age_assumed: assumed,
     age_basis: assumed ? `assumed ${MODEL.age_assumed_days} days: listed_at is not reported` : `${age} days since DefiLlama began tracking it`,
+    cat_adj: catAdj,
     base_usd: Math.round(base),
     odds: round(odds, 4),
     if_launch_usd: ifLaunch,
@@ -446,16 +476,23 @@ function olsMulti(X, y) {
   return solve3(A, rhs);
 }
 
-/** Cumulative held-out term tests: flat, curve+priors, fitted growth, fitted maturity. */
+/** Cumulative held-out term tests: flat, size curve, +priors, +EB category, +fitted growth/maturity. */
 export function termsTest(protocols, curve, asOf) {
   const live = curve.live;
   const clean = curve.clean;
   const flat = [];
-  for (const p of live) {
-    const m = quantile(live.filter((x) => x !== p).map((x) => x.mcap_usd / x.tvl_usd), 0.5);
+  const curveOnly = [];
+  const curvePriors = [];
+  for (const p of clean) {
+    const tr = live.filter((x) => x !== p);
+    const m = quantile(tr.map((x) => x.mcap_usd / x.tvl_usd), 0.5);
     flat.push(Math.abs(Math.log10((p.tvl_usd * m) / p.mcap_usd)));
+    const f = logFit(tr);
+    const base = 10 ** f.a * p.tvl_usd ** f.b;
+    curveOnly.push(Math.abs(Math.log10(base / p.mcap_usd)));
+    curvePriors.push(Math.abs(Math.log10((base * growthFactor(p) * maturityFactor(p, asOf)) / p.mcap_usd)));
   }
-  const curveErr = curve.ratios.map((r) => Math.abs(Math.log10(r)));
+  const ebErr = curve.ratios.map((r) => Math.abs(Math.log10(r)));
   const data = (term) => live.map((p) => [1, Math.log10(p.tvl_usd), term(p)]).map((x, i) => ({ x, y: Math.log10(live[i].mcap_usd), p: live[i] }));
   const fitTerm = (term) => {
     const rows = data(term);
@@ -472,7 +509,9 @@ export function termsTest(protocols, curve, asOf) {
   const age = (p) => maturityFactor(p, asOf);
   return {
     flat: round(10 ** quantile(flat, 0.5), 3),
-    curve: round(10 ** quantile(curveErr, 0.5), 3),
+    size: round(10 ** quantile(curveOnly, 0.5), 3),
+    priors: round(10 ** quantile(curvePriors, 0.5), 3),
+    curve: round(10 ** quantile(ebErr, 0.5), 3),
     growth: fitTerm(g),
     maturity: fitTerm(age),
     n: clean.length,
@@ -499,13 +538,15 @@ export function validate(protocols, curve, asOf) {
   const actuals = clean.map((p) => p.mcap_usd);
   const band = curve.band;
   const bandHits = curve.ratios.filter((r) => r >= band.p25 && r <= band.p75).length;
+  const band80Hits = curve.ratios.filter((r) => r >= band.p10 && r <= band.p90).length;
 
   const dated = clean.filter((p) => p.listed_at).slice().sort((a, b) => (a.listed_at < b.listed_at ? -1 : a.listed_at > b.listed_at ? 1 : a.slug < b.slug ? -1 : 1));
   const cut = Math.floor(dated.length * 0.6);
   const train = dated.slice(0, cut);
   const test = dated.slice(cut);
   const wf = logFit(train);
-  const wfPreds = test.map((p) => 10 ** wf.a * p.tvl_usd ** wf.b * growthFactor(p) * maturityFactor(p, asOf));
+  const wfCat = curve.fitCatAdj(train, wf);
+  const wfPreds = test.map((p) => 10 ** (wf.a + wf.b * Math.log10(p.tvl_usd) + (wfCat[p.category ?? '(none)'] ?? 0)) * growthFactor(p) * maturityFactor(p, asOf));
   const wfStats = statBlock(wfPreds, test.map((p) => p.mcap_usd));
 
   return {
@@ -515,7 +556,7 @@ export function validate(protocols, curve, asOf) {
     curve: { a: curve.fit.a, b: curve.fit.b, filtered_a: curve.filtered.a, filtered_b: curve.filtered.b, ...statBlock(curve.curvePreds, actuals) },
     global: { median: round(quantile(live.map((p) => p.mcap_usd / p.tvl_usd), 0.5)), ...statBlock(globalPreds, live.map((p) => p.mcap_usd)) },
     house: { ...statBlock(housePreds, live.map((p) => p.mcap_usd)) },
-    band: { ...band, coverage: round((bandHits / curve.ratios.length) * 100, 1) },
+    band: { ...band, coverage: round((bandHits / curve.ratios.length) * 100, 1), coverage80: round((band80Hits / curve.ratios.length) * 100, 1) },
     walk: { train_n: train.length, test_n: test.length, a: wf.a, b: wf.b, ...wfStats },
     outliers: curve.outliers,
   };
@@ -625,7 +666,7 @@ export function buildRadar(snap) {
       set_aside: aside.length,
       no_tvl: noTvl,
     },
-    curve: { a: curve.fit.a, b: curve.fit.b, fit_n: curve.live.length, clean_n: curve.clean.length, band: curve.band },
+    curve: { a: curve.fit.a, b: curve.fit.b, fit_n: curve.live.length, clean_n: curve.clean.length, band: curve.band, cat_adj: curve.catAdj },
     odds: oddsModel,
     terms: termsTest(snap.protocols, curve, snap.as_of),
     ledger: {
